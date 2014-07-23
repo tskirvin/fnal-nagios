@@ -32,8 +32,9 @@ if [[ $RPM_BUILD_ROOT != "/" ]]; then
     rm -rf $RPM_BUILD_ROOT
 fi
 
-rsync -Crlpt ./usr ${RPM_BUILD_ROOT}
 rsync -Crlpt ./etc ${RPM_BUILD_ROOT}
+rsync -Crlpt ./usr ${RPM_BUILD_ROOT}
+rsync -Crlpt ./srv ${RPM_BUILD_ROOT}
 
 mkdir -p ${RPM_BUILD_ROOT}/usr/share/perl5/vendor_perl
 rsync -Crlpt ./lib/ ${RPM_BUILD_ROOT}/usr/share/perl5/vendor_perl

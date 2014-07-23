@@ -23,8 +23,8 @@ B<FNAL::Nagios::Incident> library.
 ### Configuration ############################################################
 ##############################################################################
 
-use lib '/home/tskirvin/rpm/fnal-nagios/lib';
-our $CONFIG_FILE = '/home/tskirvin/rpm/fnal-nagios/etc/fnal/nagios.yaml';
+use lib '/root/fnal-nagios/lib';
+our $CONFIG_FILE = '/etc/fnal/nagios.yaml';
 
 ## Load the central configuration file now.
 our $CONFIG = FNAL::Nagios->load_yaml ($CONFIG_FILE);
@@ -336,9 +336,10 @@ sub process_problem {
     debug ("Do we already have an incident for '$svcName'?");
     if ( my $inc = FNAL::Nagios::Incident->read ($svcName) ) {
         my $filename = $inc->filename;
-        debug "file $filename already exists";
-        error_mail ($prefix, $description,
-            "file '$filename' already exists, will not cut another ticket");
+        debug ("file $filename already exists");
+	return 1;
+        # error_mail ($prefix, $description,
+        #     "file '$filename' already exists, will not cut another ticket");
     }
 
     my $incident = FNAL::Nagios::Incident->create ($svcName);

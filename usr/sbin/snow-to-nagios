@@ -2,12 +2,18 @@
 
 =head1 NAME
 
+snow-to-nagios - 
+
 =head1 SYNOPSIS
+
+  B<snow-to-nagios>
+
+  B<snow-to-nagios> --man
 
 =head1 DESCRIPTION
 
-Scan open SNOW incidents and reopen tickets as necessary.  This script will
-also take assignment events from SNOW and apply them to Nagios.
+Scan open Service Now incidents and reopen tickets as necessary.  This 
+script will also take assignment events from SNOW and apply them to Nagios.
 
 =cut
 
@@ -15,12 +21,10 @@ also take assignment events from SNOW and apply them to Nagios.
 ### Configuration ############################################################
 ##############################################################################
 
-use lib '/home/tskirvin/rpm/cms-monitor/lib';
+use lib '/root/fnal-nagios/lib';
 
-our $CONFIG_FILE = '/home/tskirvin/rpm/cms-monitor/etc/snow/nagios.yaml';
+our $CONFIG_FILE = '/etc/fnal/nagios.yaml';
 our $CONFIG = FNAL::Nagios->load_yaml ($CONFIG_FILE);
-
-our $DEBUG = 0;
 
 our $ERROR = 0;
 
@@ -31,7 +35,6 @@ our $ERROR = 0;
 use strict;
 use warnings;
 
-use Data::Dumper;
 use FNAL::Nagios::Incident;
 use FNAL::Nagios qw/debug set_config/;
 use Getopt::Long;
@@ -42,7 +45,7 @@ use Pod::Usage;
 ### Subroutines ##############################################################
 ##############################################################################
 
-sub print_1 { print sprintf ("  - %-20s: %s\n", @_ ) }
+sub print_1 { print sprintf ("  - %-20s %s\n", @_ ) }
 sub print_error { $ERROR = 1; print_1 ("ERROR", @_) }
 
 ### error_usage (ERROR)
@@ -55,7 +58,7 @@ sub error_usage {
 ### nagiosSocket (SITE, QUERY)
 # Interact with the Monitoring::Livestatus configuration.
 sub nagiosSocket {
-    my ($site, $query) = @_;
+    my ($site, @query) = @_;
     my $ls = $CONFIG->{'nagios'}->{'livestatus'};
 
     my $socket;
@@ -64,8 +67,8 @@ sub nagiosSocket {
     } else {
         $socket = $ls->{'default'}
     }
-    unless (-p $socket) { 
-        warn "'$socket': does not exist or is not a named pipe\n"; 
+    unless (-r $socket) { 
+        print_error ("'$socket' does not exist"); 
         return undef 
     }
     my $ml = Monitoring::Livestatus->new(
@@ -73,14 +76,30 @@ sub nagiosSocket {
         warnings => 0,
         timeout  => 10,
     );
+    my $query = join ("\n", @query);
     return $ml->selectcol_arrayref ($query);
+}
+
+### nagiosHostService (HOST)
+# 
+
+sub nagiosHostService {
+    my ($site, $host) = @_;
+    my @query = ('GET hosts', 'Columns: state host_name',
+        "Filter: host_name = $host");
+    my $nagiosLookup = nagiosSocket ($site, @query);
+    if (exists $nagiosLookup->[0]) {
+        if ($nagiosLookup->[0] == 0) { return 1 }
+        else                         { return 0 }
+    }
+    return undef
 }
 
 ### nagiosSocketService (
 sub nagiosSocketService {
     my ($site, $host, $service) = @_;
-    my $nagiosLookup = nagiosSocket ($site,
-        "GET hosts\nColumns: services_with_state\nFilter: host_name = $host");
+    my $nagiosLookup = nagiosSocket ($site, 'GET hosts', 
+       'Columns: services_with_state', "Filter: host_name = $host");
     if (exists $nagiosLookup->[0]) {
         my $arrayLength=length($nagiosLookup->[0]);
         for (my $count = 0; $count < $arrayLength; $count++) {
@@ -94,27 +113,16 @@ sub nagiosSocketService {
     return undef;
 }
 
-sub nagiosHostService {
-    my ($site, $host) = @_;
-    my $nagiosLookup = nagiosSocket ($site,
-        "GET hosts\nColumns: state\nFilter: host_name = $host");
-    if (exists $nagiosLookup->[0]) {
-        if ($nagiosLookup->[0] == 0) { return 1 }
-        else                         { return 0 }
-    }
-    return undef
-}
 
 ##############################################################################
 ### main () ##################################################################
 ##############################################################################
 
-
 my $parser = Getopt::Long::Parser->new();
 my $result = $parser->getoptions (
-    'filePath=s' => sub { set_config ('cachedir' => $_[1]) },
-    'snConfig=s' => sub { set_config ('snowConfig' => $_[2]) },
-    'd|debug'    => \$DEBUG,
+    'filepath=s' => sub { set_config ('cachedir' => $_[1]) },
+    'snconfig=s' => sub { set_config ('snowConfig' => $_[2]) },
+    'd|debug'    => \$FNAL::Nagios::DEBUG,
     'man'    => sub { pod2usage (-verbose => 2, -noperldoc => 1) },
     'h|help' => sub { pod2usage (-verbose => 1) }) || error_usage ();
 
@@ -148,8 +156,7 @@ foreach my $incident (@incidents) {
         next;
     }
 
-    print "FNAL::Nagios::Incident object\n\n";
-    print scalar $incident->print;
+    print "$number ($filename)\n";
 
     debug "Querying SN for information on '$number'";
     my @inc = $SN->tkt_by_number ($number);
@@ -162,17 +169,13 @@ foreach my $incident (@incidents) {
     }
     my $inc = $inc[0];
 
-    print "\n";
-    print "FNAL::SNOW Ticket object\n\n";
-    print scalar $SN->tkt_summary ($inc);
-
     my $assigned = $inc->{dv_assigned_to}      || '';
     my $status   = $inc->{dv_incident_state}   || 'Unknown';
     my $caller   = $inc->{dv_caller_id}        || '';
 
     if ($caller ne $me) {
         print_error (
-            "'$number' was opened by '$caller', and I am '$me'; ignoring"
+            "'$number' was opened by '$caller', and I am '$me'; skipping"
         );
         next;
     }
@@ -209,50 +212,57 @@ foreach my $incident (@incidents) {
         next;
     }
 
-    ## If we've gotten this far, then nagios thinks the service is still down.
+    print_1 ('SNOW Status', $status);
 
+    ## If we've gotten this far, then nagios thinks the service is still down.
     if (lc $status eq 'resolved' || lc $status eq 'cancelled') {
-        if ($incAck ne "yes") {
-            my $text = "resolved in SN, Nagios still sees problem; resetting";
-            print_error ($text);
-            if (my $return = FNAL::Nagios::snowReset ($number,
-                'text' => $text)) {
-                print_error ("error on incidentReset: $return");
-            }
+        my $text = "resolved in SN, Nagios still sees problem; resetting";
+        print_error ($text);
+        if (my $return = FNAL::Nagios::snowReset ($incident,
+            'text' => $text)) {
+            print_error ("error on incidentReset: $return");
+        } else {
+            print_1 ('New Status', "Reopened");
         }
     }
 
+    ## Not much to be done...
     elsif (lc $status eq 'unknown') {
         print_error ('could not detect SN incident status');
         next;
     }
 
+    ## If it was assigned in SNOW, count it as acknowledged in Nagios
     else {
-        if (lc $incAck eq 'yes') { print_1 ('Acknowledged', 'Yes') } 
-        else {
-            print_1 ('Acknowledged', 'No');
+        if (lc $incAck eq 'yes') { 
+            print_1 ('Acknowledged', 'Yes');
+        } else {
+            print_1 ('Acknowledged', 'Not Yet');
+        
+            if (! $assigned) { 
+                print_1 ('Acknowledged', 'No');
+            } else {
+                my $username = FNAL::Nagios::usernameByName ($assigned);
+                if ($username) {
+                    if (my $return = FNAL::Nagios::ack (
+                        'host'    => $host, 
+                        'service' => $service,
+                        'comment' => "$number: ack'd within SNOW",
+                        'user'    => $username,
+                        'site'    => $site 
+                    )) {
+                        print_error ("failed to write to nagios: $return");
+                        next;
+                    }
+                    print_1 ('Acknowledged', 'Just Now');
+                    print_1 ('Acknowledged By', $username);
 
-            my $username = FNAL::Nagios::usernameByName ($assigned);
-            if ($username) {
-                print_1 ('Full Name',     $assigned);
-                print_1 ('Email Address', $username);
-
-                if (my $return = FNAL::Nagios->ack (
-                    'host'    => $host, 
-                    'service' => $service,
-                    'comment' => "$number: ack'd within SN",
-                    'user'    => $username,
-                    'site'    => $site 
-                )) {
-                    print_error ("failed to write to nagios: $return");
+                    $incident->ack('yes');
+                    $incident->write;
+                } else {
+                    print_error ("could not get username from '$assigned'");
                     next;
                 }
-
-                $incident->ack('yes');
-                $incident->write;
-            } else {
-                print_error ("could not determine username from '$assigned'");
-                next;
             }
         }
     }
@@ -268,6 +278,19 @@ exit $ERROR;
 
 =over 4
 
+=item B<--filepath> I<PATH>
+
+Where should we look for B<FNAL::Nagios::Incident> files?  The default is
+defined in F</srv/monitor/nagios-incidents>, but it is actually defined in
+the YAML configuration file (see B<FNAL::Nagios>).
+
+=item B<--snconfig> I<YAMLFILE>
+
+Our Service Now configuration - URL, username, password, comes from
+an external YAML file.  We can override this if necessary.  The
+default is F</etc/snow/config.yaml> (and note that this is defined in
+B<FNAL::SNOW::Config>.
+
 =item B<--help>
 
 Print a brief help message and exits.
@@ -276,27 +299,8 @@ Print a brief help message and exits.
 
 Prints the man page and exits.
 
-=item B<--snURL>
-
-String: ServiceNow URL
-
-=item B<--snUsername>
-
-String: ServiceNow Username
-
-=item B<--snPassword>
-
-String: ServiceNow Password
-
-=item B<--incidentDir>
-
-String: Directory where SNOW incident files are kept
 
 =back
-
-=head1 EXAMPLES
-
-    snow-to-nagios --snUrl=https://fermirtn.service-now.com/  --incidentDir=/opt/omd/servicenow_incidents_trn
 
 =head1 AUTHOR
 

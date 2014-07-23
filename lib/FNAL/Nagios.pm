@@ -473,16 +473,16 @@ sub snowReset {
     my $text = $args{'text'} || 'unknown text';
     if (my $number = $incident->incident) {
         debug ("Updating '$number' on Service Now");
-        $SN->tkt_update ($number, {
+        $SN->tkt_update ($number,
               'incident_state' => '1',
               'watch_list'     => $CONFIG->{ticket}->{watch_list}
-        }) or return 'error on incident update';
+        ) or return 'error on incident update';
 
         debug ("Adding comments entry to '$number'");
-        $SN->tkt_update ($number, {
+        $SN->tkt_update ($number,
             'type'       => 'comments',
             'work_notes' => $text
-        }) or return 'error on journal update';
+        ) or return 'error on journal update';
     } else {
         return 'no incident number';
     }
@@ -502,7 +502,8 @@ sub usernameByName {
     return unless $name;
 
     debug ("looking up user '$name' in sys_user");
-    my @entries = $SN->users_by_username ($name);
+    my @entries = $SN->query ('sys_user', {'name' => $name});
+
     if (scalar @entries > 1) {
         debug ("too many matches for 'sys_user' '$name'");
         return undef
