@@ -1,7 +1,7 @@
 Name:           fnal-nagios
 Summary:        Libraries and scripts to interact with Nagios at FNAL
 Version:        0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Packager:       Tim Skirvin <tskirvin@fnal.gov>
 Group:          Applications/System
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
@@ -65,5 +65,8 @@ pod2man --section 3 --center="Perl Documentation" lib/FNAL/Nagios/Incident.pm \
 /srv/monitor/nagios-instances/.HOLD
 
 %changelog
+* Mon Jul 23 2014   Tim Skirvin <tskirvin@fnal.gov>   0-2
+- nagios-backend fixes to actually (at least partially) work
+
 * Mon Jul 23 2014   Tim Skirvin <tskirvin@fnal.gov>   0-1
 - initial packaging

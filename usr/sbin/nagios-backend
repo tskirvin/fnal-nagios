@@ -76,6 +76,8 @@ my $result = $parser->getoptions (
 my ($query, @rest) = @ARGV;
 error_usage ("no query provided") unless $query;
 
+our $CONFIG = FNAL::Nagios->load_yaml;
+
 =head1 ARGUMENTS
 
 =over 4
@@ -203,8 +205,8 @@ sub down_service {
 sub sched_host {
     my ($host, $time) = @_;
     error_usage ("Usage: schedule host HOST WHEN")
-        unless ($host && $service);
-    FNAL::Nagios::schedule_next ('host' => $hostname,
+        unless ($host);
+    FNAL::Nagios::schedule_next ('host' => $host,
         'minutes' => 0, 'start' => time, 'user' => $USER);
 }
 
@@ -212,7 +214,9 @@ sub sched_host {
 # LENGTH is in minutes; defaults to 5 seconds.
 sub sched_service {
     my ($host, $service, $time) = @_;
-    FNAL::Nagios::schedule_next ('host' => $hostname, 'service' => $service,
+    error_usage ("Usage: schedule service HOST SERVICE WHEN")
+        unless ($host && $$service);
+    FNAL::Nagios::schedule_next ('host' => $host, 'service' => $service,
         'minutes' => 0, 'start' => time, 'user' => $USER);
     error_usage ("Usage: schedule service HOST SERVICE WHEN")
         unless ($host && $service);
