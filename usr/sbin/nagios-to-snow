@@ -337,7 +337,7 @@ sub process_problem {
     if ( my $inc = FNAL::Nagios::Incident->read ($svcName) ) {
         my $filename = $inc->filename;
         debug ("file $filename already exists");
-	return 1;
+        return 1;
         # error_mail ($prefix, $description,
         #     "file '$filename' already exists, will not cut another ticket");
     }
@@ -370,7 +370,8 @@ sub process_recovery {
     debug "Opening existing ticket for '$svcName'";
     my $incident = FNAL::Nagios::Incident->read ($svcName);
     unless ($incident) {
-        error_mail ($prefix, $description, "could not open incident '$svcName'");
+        error_mail ($prefix, $description, 
+            "could not open incident '$svcName'");
     }
 
     debug ("Telling SN that host/service '$svcName' has recovered");
