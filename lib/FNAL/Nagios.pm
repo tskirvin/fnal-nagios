@@ -1,4 +1,5 @@
 package FNAL::Nagios;
+our $VERSION = "1.00";
 
 =head1 NAME
 
@@ -13,7 +14,8 @@ FNAL::Nagios - tool suite for interacting with Nagios
 
 =head1 DESCRIPTION
 
-FNAL::Nagios provides a tool suite 
+FNAL::Nagios provides a tool suite for interacting with the local Nagios
+instance, especially in connection to the Fermi Service Now service.
 
 =cut
 
@@ -277,7 +279,6 @@ sub nagios_url {
 Schedule the next time that Nagios will check a host or service, using
 external_command().  Recognized fields in ARGS: 
 
-    comment     Text for the downtime.  Required.
     host        Hostname.  Required.
     minutes     How many minutes from now should we schedule this next
                 check?  Defaults to 0 (read: immediately).
@@ -291,7 +292,6 @@ external_command().  Recognized fields in ARGS:
 sub schedule_next {
     my (%args) = @_;
 
-    my $comment = $args{'comment'} || return 'must set comment';
     my $host    = $args{'host'}    || return 'must set host';
 
     my $minutes = $args{'minutes'} || 0;
