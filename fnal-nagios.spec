@@ -39,7 +39,7 @@ rsync -Crlpt ./srv ${RPM_BUILD_ROOT}
 mkdir -p ${RPM_BUILD_ROOT}/usr/share/perl5/vendor_perl
 rsync -Crlpt ./lib/ ${RPM_BUILD_ROOT}/usr/share/perl5/vendor_perl
 
-mkdir -p ${RPM_BUILD_ROOT}/usr/share/man/man1
+mkdir -p ${RPM_BUILD_ROOT}/usr/share/man/man8
 for i in `ls usr/sbin`; do
     pod2man --section 8 --center="System Commands" usr/sbin/${i} \
         > ${RPM_BUILD_ROOT}/usr/share/man/man8/${i}.8 ;
@@ -56,12 +56,13 @@ pod2man --section 3 --center="Perl Documentation" lib/FNAL/Nagios/Incident.pm \
 # nothing to clean up as there is no build process
 
 %files
-/usr/lib64/nagios/plugins/check_nexsan
+%config(noreplace) /etc/fnal/nagios.yaml
+%config(noreplace) /etc/nagios/conf.d/snow.cfg
 /usr/sbin/*
 /usr/share/man/man3/*
 /usr/share/man/man8/*
 /usr/share/perl5/vendor_perl/FNAL/*
 
 %changelog
-* Mon Jul 07 2014   Tim Skirvin <tskirvin@fnal.gov>   0-1
+* Mon Jul 23 2014   Tim Skirvin <tskirvin@fnal.gov>   0-1
 - initial packaging
