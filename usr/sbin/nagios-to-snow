@@ -23,7 +23,6 @@ B<FNAL::Nagios::Incident> library.
 ### Configuration ############################################################
 ##############################################################################
 
-use lib '/root/fnal-nagios/lib';
 our $CONFIG_FILE = '/etc/fnal/nagios.yaml';
 
 ## Load the central configuration file now.
