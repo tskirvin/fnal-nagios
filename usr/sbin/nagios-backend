@@ -1,0 +1,380 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+nagios-backend - a remctl-based nagios backend
+
+=head1 SYNOPSIS
+
+B<nagios-backend> ack host B<HOSTNAME> B<COMMENT>
+
+B<nagios-backend> ack service B<HOSTNAME> B<SERVICE> B<COMMENT>
+
+B<nagios-backend> downtime host B<HOSTNAME> B<HOURS> B<COMMENT>
+
+B<nagios-backend> downtime service B<HOSTNAME> B<SERVICE> B<HOURS> B<COMMENT>
+
+B<nagios-backend> schedule host B<HOSTNAME> B<HOURS> B<COMMENT>
+
+B<nagios-backend> schedule service B<HOSTNAME> B<SERVICE> B<HOURS> B<COMMENT>
+
+B<nagios-backend> help
+
+B<nagios-backend> man
+
+=head1 DESCRIPTION
+
+nagios-backend provides a remctl interface to the various nagios administration
+commands necessary to keep the service running.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-h>, B<--help>
+
+Prints out the synopsis information and exits.
+
+=item B<--man>
+
+Prints out a longer manual page and exits.
+
+=back
+
+=cut
+
+##############################################################################
+### Configuration ############################################################
+##############################################################################
+
+## Where is the nagios binary?
+our $NAGIOS = "/usr/sbin/nagios";
+
+## Main Nagios configuration file
+our $NAGIOS_CFG_DIR = '/etc/nagios3';
+
+## Nagios takes its commands via a Unix pipe
+our $NAGIOS_CMD = "/var/lib/nagios3/rw/nagios.cmd";
+
+## Nagios init file
+our $NAGIOS_INIT = "/etc/init.d/nagios";
+
+## Where are we keeping our nagios git repository?
+our $NAGIOS_REPO = "/srv/git/pcds-nagios.git";
+
+## nagiosstats binary
+our $NAGIOS_STATS = "/usr/sbin/nagiosstats";
+
+### Key binaries
+our $GIT   = "/usr/bin/git";
+our $RSYNC = "/usr/bin/rsync";
+
+##############################################################################
+### Declarations #############################################################
+##############################################################################
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use File::Temp qw/tempdir/;
+use Pod::Usage;
+
+$|++;               # flush output
+
+## Who is running this script?
+our $USER = $ENV{'REMOTE_USER'} || $ENV{'SUDO_USER'} || 'unknown';
+
+##############################################################################
+### main () ##################################################################
+##############################################################################
+
+my $parser = new Getopt::Long::Parser;
+my $result = $parser->getoptions (
+    'man'      => sub { pod2usage (-verbose => 2, -noperldoc => 1) },
+    'h|help'   => sub { pod2usage (-verbose => 1) }) || error_usage ();
+
+my ($query, @rest) = @ARGV;
+error_usage ("no query provided") unless $query;
+
+=head1 ARGUMENTS
+
+=over 4
+
+=item ack host B<HOST> B<COMMENT>
+
+=item ack service B<HOST> B<SERVICE> B<COMMENT>
+
+Acknowledge a host or service as down.  B<HOST> is the hostname, B<SERVICE> the
+service name, and B<COMMENT> is some explanatory text explaning why it's down.
+
+=cut
+
+if      (lc $query eq 'ack') {
+    my ($type, @args) = @rest;
+    if    (lc $type eq 'host')    { ack_host (@args) }
+    elsif (lc $type eq 'service') { ack_service (@args) }
+    else                          { error_usage ("invalid ack type: $type") }
+}
+
+=item check
+
+Confirm that the config file validates.
+
+=cut
+
+elsif (lc $query eq 'check') { validate () }
+
+=item downtime host B<HOST> B<HOURS> B<COMMENT>
+
+=item downtime service B<HOST> B<SERVICE> B<HOURS> B<COMMENT>
+
+Schedule downtime for a host or service.  B<HOST> is the hostname, B<SERVICE>
+the service name, B<HOURS> is the number of hours of downtime you want to
+schedule, and B<COMMENT> is some explanatory text.
+
+=cut
+
+elsif (lc $query eq 'downtime') {
+    my ($type, @args) = @rest;
+    if    (lc $type eq 'host')    { down_host (@args) }
+    elsif (lc $type eq 'service') { down_service (@args) }
+    else                          { error_usage ("invalid down type: $type") }
+}
+
+=item pull
+
+Update the current nagios tree from git.
+
+=cut
+
+elsif (lc $query eq 'pull') { pull () }
+
+=item schedule host B<HOST> B<HOURS> B<COMMENT>
+
+=item schedule service B<HOST> B<SERVICE> B<HOURS> B<COMMENT>
+
+Schedule the next time that a given host/service check should occur.
+B<HOST> is the hostname, B<SERVICE> the service name, B<MINUTES> is the
+number of minutes you want to wait (defaults to 0).
+
+
+=cut
+
+elsif (lc $query eq 'schedule') {
+    my ($type, @args) = @rest;
+    if    (lc $type eq 'host')    { sched_host (@args) }
+    elsif (lc $type eq 'service') { sched_service (@args) }
+    else                          { error_usage ("invalid sched type: $type") }
+}
+
+=item validate
+
+Check to make sure that the current config file is valid.  This is accomplished
+by rsync'ing the current config into a new temporary directory, and running
+'nagios -v' against it (after tweaking the file to use config files right).
+
+=cut
+
+elsif (lc $query eq 'validate') { validate () }
+
+=item stats
+
+Print information about the current statistics.  Uses I<nagiosstats>.
+
+=cut
+
+elsif (lc $query eq 'stats') { system $NAGIOS_STATS }
+
+=item restart
+
+Restart nagios (with the init script).
+
+=cut
+
+elsif (lc $query eq 'restart') { system ("$NAGIOS_INIT restart") }
+
+=item man
+
+Print the manual and exit.  (Same as --man)
+
+=cut
+
+elsif (lc $query eq 'man') { pod2usage (-verbose => 2, -noperldoc => 1) }
+
+=item help
+
+Print a short help page and exit.  (Same as --help)
+
+=cut
+
+elsif (lc $query eq 'help') { pod2usage (-verbose => 1); }
+
+=back
+
+=cut
+
+else { error_usage ("invalid query: $query") }
+
+exit 0;
+
+##############################################################################
+### Subroutines ##############################################################
+##############################################################################
+
+### ack_host (HOST, COMMENT)
+sub ack_host         {
+    my ($host, $comment) = @_;
+    error_usage ("Usage: ack host HOST COMMENT")
+        unless ($host && $comment);
+    my $cmd = sprintf ("[%s] ACKNOWLEDGE_HOST_PROBLEM;%s", time, $host);
+    return external_command ($cmd, 1, 1, 1, $USER, $comment);
+}
+
+### ack_service (HOST, SERVICE, COMMENT)
+sub ack_service      {
+    my ($host, $service, $comment) = @_;
+    error_usage ("Usage: ack service HOST SERVICE COMMENT")
+        unless ($host && $service && $comment);
+    my $cmd = sprintf ("[%s] ACKNOWLEDGE_SVC_PROBLEM;%s;%s",
+        time, $host, $service);
+    return external_command ($cmd, 1, 1, 1, $USER, $comment);
+}
+
+### down_host (HOST, LENGTH, COMMENT)
+# LENGTH is in hours.  Partial hours are okay.
+sub down_host    {
+    my ($host, $length, $comment) = @_;
+    error_usage ("Usage: downtime host HOST LENGTH COMMENT")
+        unless ($host && $length && $comment);
+    my $cmd = sprintf ("[%s] SCHEDULE_HOST_DOWNTIME;%s", time, $host);
+    my $duration = 3600 * $length;
+    return external_command ($cmd, time, time + $duration, 1, 0, $duration,
+        $USER, $comment);
+}
+
+### down_service (HOST, SERVICE, LENGTH, COMMENT)
+# LENGTH is in hours.  Partial hours are okay.
+sub down_service {
+    my ($host, $service, $length, $comment) = @_;
+    error_usage ("Usage: downtime service HOST SERVICE LENGTH COMMENT")
+        unless ($host && $service && $length && $comment);
+    my $cmd = sprintf ("[%s] SCHEDULE_SVC_DOWNTIME;%s;%s",
+        time, $host, $service);
+    my $duration = 3600 * $length;
+    return external_command ($cmd, time, time + $duration, 1, 0, $duration,
+        $USER, $comment);
+}
+
+### pulltest ()
+# Pull down the most recent version of the repo and tests it.  Doesn't actaully
+# work right now, and I'm not sure why.
+sub pulltest {
+    my $tempdir = tempdir (undef, 'CLEANUP' => 1);
+    my $cmd = "$GIT clone -vq $NAGIOS_REPO $tempdir";
+    print "$cmd\n";
+    system ("ls /tmp $tempdir");
+    system $cmd;
+    system ("ls /tmp $tempdir");
+    return validate_dir ($tempdir);
+}
+
+### pull ()
+# Pulls the most recent version of the config file from git.
+sub pull {
+    my $cmd = "cd $NAGIOS_CFG_DIR && $GIT pull --rebase";
+    system $cmd;
+}
+
+### sched_host (HOST, TIME)
+# LENGTH is in minutes; defaults to 0.
+sub sched_host {
+    my ($host, $time) = @_;
+    $time ||= 0;
+    error_usage ("Usage: schedule host HOST LENGTH") unless ($host);
+    my $at  = $time ? 60 * $time : 5;
+    my $cmd = sprintf ("[%s] SCHEDULE_FORCED_HOST_CHECK;%s", time, $host);
+    return external_command ($cmd, time + $at, $USER);
+}
+
+### sched_service (HOST, SERVICE, TIME)
+# LENGTH is in minutes; defaults to 5 seconds.
+sub sched_service {
+    my ($host, $service, $time) = @_;
+    $time ||= 0;
+    error_usage ("Usage: schedule service HOST SERVICE LENGTH")
+        unless ($host && $service);
+    my $at  = $time ? 60 * $time : 5;
+    my $cmd = sprintf ("[%s] SCHEDULE_FORCED_SVC_CHECK;%s;%s",
+        time, $host, $service);
+    return external_command ($cmd, time + $at, $USER);
+}
+
+### validate ()
+# Confirm that the nagios code validates.  Invokes validate_dir ()
+sub validate {
+    my $tempdir = tempdir (undef, 'CLEANUP' => 1);
+    my $basedir = $NAGIOS_CFG_DIR;
+    system ("/usr/bin/rsync -a $basedir/ $tempdir");
+    validate_dir ($tempdir);
+}
+
+### validate_dir
+sub validate_dir {
+    my ($dir) = @_;
+    my $basedir = $NAGIOS_CFG_DIR;
+    my $config = "$dir/nagios.cfg";
+    system ("/bin/sed -i -e 's%$basedir%$dir%g' $config");
+    my $cmd = "$NAGIOS -v $config | /bin/grep -E 'Warning|Error|Unable'";
+    return system "$cmd";
+}
+
+##############################################################################
+### Internal Subroutines #####################################################
+##############################################################################
+
+### error (TEXT) - die with a consistent error message
+sub error {
+    my $text = "@_";
+    chomp $text;
+    die "$0: $text\n"
+}
+
+### error_usage (TEXT)
+# Print an error message, then the basic help page
+sub error_usage {
+    warn "$0: @_\n\n";
+    pod2usage (-exit_status => 2, -verbose => 1);
+}
+
+### external_command (@COMMAND)
+# Run an external nagios command by writing text to $NAGIOS_CMD
+sub external_command {
+    my (@command) = @_;
+    my $cmd = join (';', @command);
+    open (CMD, "> $NAGIOS_CMD") or
+        error ("could not write to $NAGIOS_CMD: $@");
+    print CMD "$cmd\n";
+    close CMD;
+}
+
+##############################################################################
+### Final Documentation ######################################################
+##############################################################################
+
+=head1 NOTES
+
+Because we're writing to a named pipe in order to send commands to the nagios
+process, there is no good way of confirming that a nagios command actually
+*worked*.  Keep that in mind.
+
+=head1 AUTHOR
+
+Tim Skirvin <tskirvin@slac.stanford.edu>, based on work by Huaqing Zheng
+<morpheus@stanford.edu> and Xueshan Feng <sfeng@stanford.edu>.
+
+=head1 LICENSE
+
+For SLAC internal use only.
+
+=cut

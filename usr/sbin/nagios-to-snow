@@ -1,0 +1,429 @@
+#!/usr/bin/env perl
+
+=head1 NAME
+
+nagios-to-snow - integrates Nagios and ServiceNow Incidents
+
+=head1 SYNOPSIS
+
+B<nagios-to-snow> --type I<PROBLEM|ACKNOWLEDGE|RECOVERY> < I<STDIN>
+
+=head1 DESCRIPTION
+
+nagios-to-snow creates and manages incidents in Service Now based on inputs
+from Nagios.  This generally consists of three types of actions: PROBLEM
+(creates a ticket), ACK (updates the ticket), and RECOVERY (closes the ticket).
+
+Logs of open tickets are stored in a central directory (defined in a central
+configuration file).
+
+=cut
+
+##############################################################################
+### Configuration ############################################################
+##############################################################################
+
+use lib '/home/tskirvin/rpm/fnal-snow/lib';
+use lib '/home/tskirvin/rpm/cms-monitor/lib';
+our $CONFIG_FILE = '/home/tskirvin/rpm/cms-monitor/etc/snow/nagios.yaml';
+
+## Load the central configuration file now.
+our $CONFIG = FNAL::Nagios->load_yaml ($CONFIG_FILE);
+
+## If set, print debugging information as we go and send error mails to 
+## STDOUT instead.  Defaults to 0, can be set with '--debug'.
+our $DEBUG = 0;
+
+## OMD == Open Monitoring Distribution
+our $OMD_SITE = $ENV{'OMD_SITE'} || 'default';
+
+## Who am I?  Chosen by environent variables, can be set with '--user'.
+our $USER  = $ENV{'REMOTE_USER'} || $ENV{'USER'} || getpwuid ($>);
+$CONFIG->{nagios}->{ack}->{author} ||= $USER;
+
+##############################################################################
+### Declarations #############################################################
+##############################################################################
+
+use strict;
+use warnings;
+use vars qw/$CI $SN $TYPE/;
+
+use FNAL::Nagios qw/debug error_mail set_config/;
+use FNAL::Nagios::Incident;
+use Getopt::Long;
+use Pod::Usage;
+use Sys::Hostname;
+
+$|++;
+
+##############################################################################
+### Subroutines ##############################################################
+##############################################################################
+
+### error_usage (ERROR)
+# Exit out with pod2usage.
+
+sub error_usage {
+    my ($error) = @_;
+    pod2usage (-exit_status => 2, -verbose => 1);
+}
+
+### make_notes (MSG)
+# Generate a formatted error message for text fields in SN.  
+
+sub make_notes {
+    my @return;
+    while (@_) { push @return, sprintf ("<b>%s</b>: %s", shift, shift) }
+    return "[code]<br />" . join('<br />', @return) . "[/code]"
+}
+
+### parse_options ()
+# This Getopt::Long::Parser call was getting long and unwieldy, so 
+# let's move it to its own function.
+
+sub parse_options {
+    my $parser = Getopt::Long::Parser->new();
+    my $result = $parser->getoptions (
+
+        ## Required Parameters
+        't|type=s'    => \$TYPE,
+        'ci|ciName=s' => \$CI,
+    
+        ## Optional Parameters
+        'd|debug'   => \$FNAL::Nagios::DEBUG,
+        'omdSite=s' => \$OMD_SITE,
+    
+        ## Basic level configuration parameters
+        'filePath=s' => sub { set_config ('cachedir' => $_[1]) },
+        'snConfig=s' => sub { set_config ('snowConfig' => $_[1]) },
+    
+        ## Incident fields that do match the field name
+        'category=s'             => sub { set_ticket (@_) },
+        'impact=i'               => sub { set_ticket (@_) },
+        'lastServiceProblemID=s' => sub { set_ticket (@_) },
+        'serviceName=s'          => sub { set_ticket (@_) },
+        'serviceProblemID=s'     => sub { set_ticket (@_) },
+        'state=s'                => sub { set_ticket (@_) },
+        'urgency=i'              => sub { set_ticket (@_) },
+        'assignmentGroup=s'      => sub { set_ticket (@_) },
+
+        ## Incident fields that don't quite match the field name
+        'caller=s'   => sub { set_ticket ('caller_id'         => $_[1]) },
+        'incident=s' => sub { set_ticket ('incident_number'   => $_[1]) },
+        'page=i'     => sub { set_ticket ('u_page_primary'    => $_[1]) },
+        'subject=s'  => sub { set_ticket ('short_description' => $_[1]) },
+    
+        ## Error email fields
+        'emailFrom=s'      => sub { set_nagios ('errorMail', 'from', @_ ) },
+        'emailErrorList=s' => sub { set_nagios ('errorMail', 'to',   @_ ) },
+    
+        ## Nagios acknowledgement information
+        ## TODO - ackAuthor will be a long string; have to get the username out of it
+        'ackAuthor:s'      => sub { set_nagios ('ack', 'author',  $_[1] ) },
+        'ackComment:s'     => sub { set_nagios ('ack', 'comment', $_[1] ) },
+    
+        ## Help functionality
+        'man'    => sub { pod2usage (-verbose => 2, -noperldoc => 1) },
+        'h|help' => sub { pod2usage (-verbose => 1) }) || error_usage ();
+
+    $FNAL::Nagios::Incident::BASEDIR = $CONFIG->{cachedir};
+    $CONFIG->{nagios}->{site} = $OMD_SITE;
+
+    unless ($TYPE) { error_usage ("no '--type' offered") }
+    unless ($CI)   { error_usage ("no '--ciname' offered") }
+ 
+    return $parser;
+}
+
+
+### process_ack (svcName, description)
+# Process an acknowledgement.
+
+sub process_ack {
+    my ($svcName, $description) = @_;
+    my $prefix = "ACK $svcName";
+
+    debug ("Opening existing ticket for $svcName");
+    my $incident = FNAL::Nagios::Incident->read ($svcName);
+    unless ($incident) {
+        error_mail ($prefix, $description,
+            "could not open incident '$svcName'");
+    }
+
+    my $fileIncNumber = $incident->incident;
+    if ($fileIncNumber eq "") {
+        error_mail ($prefix, $description,
+            "no INC in $svcName (" .  $incident->file .")" );
+    }
+
+    my $fileAck = $incident->ack || 'unknown';
+    if ($fileAck eq 'unknown') {
+        debug "$fileIncNumber: acknowledging";
+        my $return = FNAL::Nagios::incidentAck ($incident,
+            'text' => $CONFIG->{nagios}->{ack}->{comment},
+            'user' => $CONFIG->{nagios}->{ack}->{author}
+        );
+        if ($return) { 
+            error_mail ($prefix, $description, "failed to update: '$return'");
+        } else {
+            debug ("Creating FNAL::Nagios::Incident file for '$svcName'");
+            $incident->ack ('yes');
+            $incident->write or
+                error_mail ($prefix, $description, "failed to create: $@");
+        }
+     } else {
+         print "incident '$svcName' already acknowledged\n";
+         return 0;
+     }
+}
+
+### process_problem (svcName, description)
+# 
+sub process_problem {
+    my ($svcName, $description) = @_;
+    my $prefix = "PROBLEM $svcName";
+
+    set_ticket ('description', $description);
+    set_ticket ('cmdb_ci',     $svcName);
+
+    debug ("Do we already have an incident for '$svcName'?");
+    if ( my $inc = FNAL::Nagios::Incident->read ($svcName) ) {
+        my $filename = $inc->filename;
+        debug "file $filename already exists";
+        error_mail ($prefix, $description,
+            "file '$filename' already exists, will not cut another ticket");
+    }
+
+    my $incident = FNAL::Nagios::Incident->create ($svcName);
+    $incident->site ($CONFIG->{nagios}->{site});
+
+    debug ("Creating incident for '$svcName'");
+    my $number = FNAL::Nagios::incidentCreate ($incident,
+        'ticket' => $CONFIG->{ticket}
+    );
+    unless ($number && $number =~ /^\w+\d+$/) {
+        error_mail ($prefix, $description, "ticket was not created")
+    }
+
+    $incident->incident ($number);
+    debug ("Writing $number information to " . $incident->filename);
+    $incident->write;
+
+    return 0;
+}
+
+### process_recovery (svcName, description)
+#
+
+sub process_recovery {
+    my ($svcName, $description) = @_;
+    my $prefix = "RECOVERY $svcName";
+
+    debug "Opening existing ticket for '$svcName'";
+    my $incident = FNAL::Nagios::Incident->read ($svcName);
+    unless ($incident) {
+        error_mail ($prefix, $description, "could not open incident '$svcName'");
+    }
+
+    debug ("Telling SN that host/service '$svcName' has recovered");
+    my $return = FNAL::Nagios::incidentRecovery ($incident,
+        'text' => 'The host/service has been restored.');
+    if ($return) { 
+        error_mail ($prefix, $description, "failed to update: '$return'");
+    } else {
+        debug ("Removing FNAL::Nagios::Incident file for '$svcName'");
+        $incident->unlink or 
+            error_mail ($prefix, $description, "failed to unlink: $@");
+    }
+    return;
+}
+
+### set_nagios (FIELD, VALUE)
+# Set $CONFIG->{nagios}->{FIELD} = VALUE
+sub set_nagios { set_config ('nagios', @_ ) }
+
+### set_nagios_ack (FIELD, VALUE)
+# Set $CONFIG->{nagios}->{ack}->{FIELD} = VALUE
+sub set_nagios_ack { set_config ('nagios', 'ack', @_ ) }
+
+### set_ticket (FIELD, VALUE)
+# Set $CONFIG->{ticket}->{FIELD} = VALUE
+sub set_ticket { set_config ('ticket', @_ ) }
+
+##############################################################################
+### main () ##################################################################
+##############################################################################
+
+parse_options ();
+
+debug ("Getting text on STDIN");
+my $description = join ("\n", <>);
+chomp $description;
+
+my ($svcName, $url);
+if ($CONFIG->{ticket}->{serviceName} eq 'host') { $svcName = $CI } 
+else {
+    my $sname = $CONFIG->{ticket}->{serviceName};
+    my $id = $CONFIG->{ticket}->{serviceProblemID}
+          || $CONFIG->{ticket}->{lastServiceProblemID}
+          || 0;
+
+    $svcName = join (':', $CI, $sname, $id);
+}
+
+our $SN = FNAL::Nagios::connect_to_sn ($CONFIG);
+
+if    (lc $TYPE eq 'problem')  { process_problem  ($svcName, $description) }
+elsif (lc $TYPE eq 'recovery') { process_recovery ($svcName, $description) }
+elsif (lc $TYPE eq 'ack')      { process_ack      ($svcName, $description) }
+else                           { error_usage ("unknown type: '$TYPE'") }
+
+exit 0;
+
+##############################################################################
+### Final Documentation ######################################################
+##############################################################################
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-page>
+
+Values <0|1>: Execute paging operation within ServiceNow upon ticket creation.
+
+=item B<-urgency>
+
+Values [1-5]: ServiceNow urgency value
+
+=item B<-impact>
+
+Values [1-5]: ServiceNow impact value
+
+=item B<-ciname>
+
+String: Hostname of the machine, will be used within the CI field of ServiceNow
+
+=item B<-type>
+
+Values [PROBLEM|RECOVERY|ACKNOWLEDGEMENT]
+
+=item B<-state>
+
+Values [UP|DOWN]: Nagios state for specified asset
+
+=item B<-subject>
+
+String: ServiceNow subject field used in the creation of a new ticket.
+
+=item B<-incident>
+
+String: ServiceNow incident number
+
+=item B<-ackauthor>
+
+String: Value used to assign ticket ownership within ServiceNow
+
+=item B<-ackcomment>
+
+String: Value inserted into journal entry of ServiceNow while
+acknowledging a ticket
+
+=item B<-categorization>
+
+String: ServiceNow u_categorization field
+
+=item B<-assignmentGroup>
+
+String: ServiceNow group which should be assigned the newly created ticket
+
+=item B<-caller>
+
+String: ServiceNow caller_id field
+
+=item B<-filepath>
+
+String: Location where Nagios incident files should be stored
+
+=item B<-snURL>
+
+String: ServiceNow URL
+
+=item B<-snUsername>
+
+String: ServiceNow Username
+
+=item B<-snPassword>
+
+String: ServiceNow Password
+
+=item B<--type> F<TYPE>
+
+What kind of update is this?  Must be one of the following: PROBLEM,
+ACKNOWLEDGEMENT, or RECOVERY.  Required.
+
+=item B<--help>
+
+Prints out basic full help documentation and exits.
+
+=item B<--man>
+
+Prints out the full help documentation and exits.
+
+=back
+
+=head1 DATA FILES
+
+=head1 SCHEMA
+
+=over 4
+
+=item Host Alerts
+
+=item Service Alerts
+
+=back 4
+
+=head1 EXAMPLES
+
+=over 2
+
+=item PROBLEM
+
+    echo -n "(sample)\n<==End of alert==>" | \
+        nagios-to-snow --type=PROBLEM \
+        --ciname=d0www  --state=DOWN \
+        --subject="Nagios Host Alert: Problem with d0www"
+
+=item ACKNOWLEDGEMENT
+
+    echo -n "(sample)\n<==End of alert==>" | \
+        nagios-to-snow --type=ACKNOWLEDGEMENT \
+        --ciname=d0www --state=DOWN \
+        --subject="Nagios Host Alert: Problem with d0www" \
+        --ackauthor="`whoami`" \
+        --ackcomment="This is a sample acknowledgment"
+
+=item RECOVERY
+
+    echo -n "(sample)\n<==End of alert==>" | \
+        nagios-to-snow --type=RECOVERY \
+        --ciname=d0www --state=UP
+
+=back
+
+=head1 AUTHOR
+
+Tyler Parsons <tyler.parsons-fermilab@dynamicpulse.com>
+
+Tim Skirvin <tskirvin@fnal.gov>
+
+=head1 LICENSE
+
+Copyright 2014, Fermi National Accelerator Laboratory
+
+This program is free software; you may redistribute it and/or modify it under
+the same terms as Perl itself.
+
+=cut

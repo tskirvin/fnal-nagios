@@ -1,0 +1,41 @@
+# cachedir: '/srv/monitor/snow-incidents'
+cachedir: '/tmp/snow-incidents'
+snowConfig: '/etc/snow/config.yaml'
+
+nagios:
+    ack:
+        author:
+        comment:
+    errorMail:
+        to:                 'tskirvin@fnal.gov'
+        from:               'cms-nagios@fnal.gov'
+        subjectPrefix:      'nagios'
+    livestatus:
+        prefix:  '/omd/sites'
+        suffix:  'tmp/run/live'
+        default: '/var/run/nagios/rw/live'
+    prefix: 'uscms-t1'
+    site:
+    style:  'nagios'
+    url:    'https://cms-monitor.fnal.gov/nagios'
+
+## Default fields that will be created in a new ticket created with this
+## package.  The programs should let you override necessary fields from
+## the command line.
+ticket:
+    assignment_group:       'CMS-CIS'
+    caller_id:              'cd-srv-cmdb'
+    comment:                '(no comment)'
+    group:                  'CMS-CIS'
+    impact:                 '3'
+    servicename:            'host'
+    short_description:      '(no subject)'
+    u_categorization:       'Hardware -- Server -- Linux'
+    u_item:                 'Linux'
+    u_operational_category: 'Break/Fix'
+    u_page_primary:         '0'
+    u_reported_source:      'Event Monitoring'
+    urgency:                '3'
+    u_service:              'Scientific Services'
+    u_service_type:         'Server'
+    watch_list:             'tskirvin@fnal.gov'
