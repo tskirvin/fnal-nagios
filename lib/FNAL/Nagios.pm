@@ -2,7 +2,7 @@ package FNAL::Nagios;
 
 =head1 NAME
 
-FNAL::Nagios -
+FNAL::Nagios - tool suite for interacting with Nagios
 
 =head1 SYNOPSIS
 
@@ -13,19 +13,22 @@ FNAL::Nagios -
 
 =head1 DESCRIPTION
 
+FNAL::Nagios provides a tool suite 
+
 =cut
 
 ##############################################################################
 ### Configuration ############################################################
 ##############################################################################
 
-our $BASEDIR = '/srv/monitor/snow-incidents';
-our $CONFIG_FILE = '/etc/snow/nagios.yaml';
+our $CONFIG_FILE = '/etc/fnal/nagios.yaml';
 
+## If set, we will print degugging information to STDERR.
 our $DEBUG = 0;
-our @ARGS_ORIG = @ARGV;
 
-use vars qw/$SN $CONFIG/;
+## Used by error_mail, this needs to be stored before the scripts will start
+## modifying it.
+our @ARGS_ORIG = "$0 @ARGV";
 
 ##############################################################################
 ### Declarations #############################################################
@@ -37,13 +40,15 @@ use warnings;
 use Class::Struct;
 use Data::Dumper;
 use Exporter;
-use MIME::Lite;
 use FNAL::SNOW;
+use MIME::Lite;
 use YAML::Syck;
 
 our @ISA       = qw/Exporter/;
 our @EXPORT    = qw//;
 our @EXPORT_OK = qw/debug error_mail set_config/;
+
+use vars qw/$SN $CONFIG/;
 
 ##############################################################################
 ### Subroutines ##############################################################
@@ -53,7 +58,15 @@ our @EXPORT_OK = qw/debug error_mail set_config/;
 
 =over 4
 
-=item ack 
+=item ack (ARGS)
+
+Acknowledge a host or service problem using external_command().  Recognized
+fields in ARGS:
+
+   comment      Text of the acknowledgement.  Required.
+   host         Which host is associated with the problem?  Required.
+   svc          Which service (if any)?
+   user         Which user ack'd the problem?
 
 =cut
 
@@ -111,9 +124,18 @@ Print a debugging message to STDERR if $DEBUG is set.
 
 sub debug { if ($DEBUG) { warn "@_\n" } }
 
-=item downtime ()
+=item downtime (ARGS)
 
-[...]
+Schedule Nagios downtime for a host or service using external_command().  
+Recognized fields in ARGS:
+
+    comment     Text for the downtime.  Required.
+    host        Hostname.  Required.
+    hours       How many hours will this be down?  Defaults to 0.
+    service     Service.
+    start       When should this start (in seconds-since-epoch)?  
+                Defaults to the current timestamp.
+    user        Who asked for this downtime?  
 
 =cut
 
@@ -153,7 +175,7 @@ sub error_mail {
 
     my @debug;
     push @debug, "=====[ DEBUG ]=====";
-    push @debug, "command line:", "  $0 @ARGS_ORIG", '';
+    push @debug, "command line:", "  @ARGS_ORIG", '';
 
     my $save = $Data::Dumper::Indent;
     $Data::Dumper::Indent = 1;
@@ -250,109 +272,19 @@ sub nagios_url {
     }
 }
 
-=item incidentAck (INCIDENT, ARGS)
+=item schedule_next (ARGS)
 
-=cut
+Schedule the next time that Nagios will check a host or service, using
+external_command().  Recognized fields in ARGS: 
 
-sub incidentAck {
-    my ($incident, %args) = @_;
-    my $text  = $args{'text'} || 'unknown text';
-    my $user  = $args{'user'} || 'unknown user';
-    if (my $number = $incident->incident) {
-        debug "Incident '$number': acknowledging";
-        $SN->tkt_update ($number,
-            'assigned_to'    => $user,
-            'incident_state' => '2',
-        ) or return 'error on incident update';
-        $SN->tkt_update ($number,
-            'type'     => 'comments',
-            'comments' => _make_notes (
-                'Acked in Nagios by', $user,
-                'Nagios comment',     $text,
-            )
-        ) or return 'error on journal update';
-    } else {
-        return 'no incident number';
-    }
-    return;
-}
-
-=item incidentCreate (INCIDENT, ARGS)
-
-=cut
-
-sub incidentCreate {
-    my ($incident, %args) = @_;
-    my $ticket  = $args{'ticket'}  || return 'no ticket';
-
-    debug ("Creating new entry in Service Now");
-    my $number = $SN->tkt_create ('incident', %{$ticket});
-    return 'unable to create ticket' unless $number;
-
-    my $url = FNAL::Nagios->nagios_url ($incident->host, $incident->service);
-
-    $SN->tkt_update ($number, 
-        'type'       => 'work_notes',
-        'work_notes' => _make_notes (
-            'URL'         => "<a href='$url' target='_blank'>$url</a>",
-            'Nagios Site' => $incident->site || ''
-        )
-    );
-
-    return $number;
-}
-
-=item incidentRecovery (INCIDENT, ARGS)
-
-=cut
-
-sub incidentRecovery {
-    my ($incident, %args) = @_;
-    my $text = $args{'text'} || 'unknown text';
-    if (my $number = $incident->incident) {
-        debug ("Updating '$number' on Service Now");
-        $SN->tkt_update ($number,
-            'closed_by'      => $CONFIG->{ticket}->{caller_id},
-            'close_code'     => 'Other (must describe below)',
-            'close_notes'    => $text,
-            'incident_state' => '6',
-        ) or return 'error on incident update';
-
-        debug ("Adding work_notes entry to '$number'");
-        $SN->tkt_update ($number,
-            'type'       => 'work_notes',
-            'work_notes' => _make_notes ('Automated Message', $text)
-        ) or return 'error on journal update';
-    } else {
-        return 'no incident number';
-    }
-    return;
-}
-
-sub incidentReset {
-    my ($incident, %args) = @_;
-    my $text = $args{'text'} || 'unknown text';
-    if (my $number = $incident->incident) {
-        debug ("Updating '$number' on Service Now");
-        $SN->tkt_update ($number, {
-              'incident_state' => '1',
-              'watch_list'     => $CONFIG->{ticket}->{watch_list}
-        }) or return 'error on incident update';
-
-        debug ("Adding comments entry to '$number'");
-        $SN->tkt_update ($number, {
-            'type'       => 'comments',
-            'work_notes' => $text
-        }) or return 'error on journal update';
-    } else {
-        return 'no incident number';
-    }
-    return;
-}
-
-=item schedule_next ()
-
-[...]
+    comment     Text for the downtime.  Required.
+    host        Hostname.  Required.
+    minutes     How many minutes from now should we schedule this next
+                check?  Defaults to 0 (read: immediately).
+    start       When should this start (in seconds-since-epoch)?  
+                Defaults to the current timestamp.
+    service     Service name.
+    user        User requesting the check.
 
 =cut
 
@@ -368,6 +300,7 @@ sub schedule_next {
     my $user    = $args{'user'}    || '*unknown*';
 
     my $at = $minutes * 60;
+    my $time = $start + $at;
 
     my $cmd;
     if ($host && $svc) {
@@ -378,7 +311,7 @@ sub schedule_next {
             $start, $host);
     } else { return 'bad usage; must set either host or service' }
 
-    return external_command ($cmd, $start, $user);
+    return external_command ($cmd, $time, $user);
 }
 
 =item set_config (FIELD [, FIELD [, FIELD [, FIELD]]], VALUE)
@@ -406,7 +339,161 @@ sub set_config {
     else                     { die "too many arguments in set_config: $@\n"; }
 }
 
-=item usernameByName (name)
+=item snowAck (INCIDENT, ARGS)
+
+Acknowledge an incident.  This consists of:
+
+    * Updating 'assigned_to' to the person who performed the acknowledgement,
+      and setting the 'incident_state' to '2' ('Work In Progress').
+    * Creating a new comment journal entry with the text.
+
+I<INCIDENT> is an B<FNAL::Nagios::Incident> object with an included incident
+number.  Valid options for the ARGS hash:
+
+   user     User that did the acknowledgement.
+   text     Text of the acknowledgement.
+
+Returns an error if there is one, or undef on success.
+
+=cut
+
+sub snowAck {
+    my ($incident, %args) = @_;
+    my $text  = $args{'text'} || 'unknown text';
+    my $user  = $args{'user'} || 'unknown user';
+    if (my $number = $incident->incident) {
+        debug "Incident '$number': acknowledging";
+        $SN->tkt_update ($number,
+            'assigned_to'    => $user,
+            'incident_state' => '2',
+        ) or return 'error on incident update';
+        $SN->tkt_update ($number,
+            'type'     => 'comments',
+            'comments' => _make_notes (
+                'Acked in Nagios by', $user,
+                'Nagios comment',     $text,
+            )
+        ) or return 'error on journal update';
+    } else {
+        return 'no incident number';
+    }
+    return;
+}
+
+=item snowCreate (INCIDENT, ARGS)
+
+Creates a new incident.  This consists of:
+
+    * Create the ticket with B<tkt_create()>.
+    * Create a new work_notes entry with links to the original Nagios
+      incident.
+
+I<INCIDENT> is an B<FNAL::Nagios::Incident> object with included host/service
+names.  Valid options for the ARGS hash:
+
+    ticket  Hashref containing the key/value pairs of all of the fields
+            necessary to create the ticket.  Required.
+
+Returns an error if there is one, or undef on success.
+
+=cut
+
+sub snowCreate {
+    my ($incident, %args) = @_;
+    my $ticket  = $args{'ticket'}  || return 'no ticket';
+
+    debug ("Creating new entry in Service Now");
+    my $number = $SN->tkt_create ('incident', %{$ticket});
+    return 'unable to create ticket' unless $number;
+
+    my $url = FNAL::Nagios->nagios_url ($incident->host, $incident->service);
+
+    $SN->tkt_update ($number, 
+        'type'       => 'work_notes',
+        'work_notes' => _make_notes (
+            'URL'         => "<a href='$url' target='_blank'>$url</a>",
+            'Nagios Site' => $incident->site || ''
+        )
+    );
+
+    return $number;
+}
+
+=item snowRecovery (INCIDENT, ARGS)
+
+Resolves an existing incident.  This consists of:
+
+    * Close the incident with appropriate 'closed_by', 'close_code',
+      'close_notes' fields, and 'incident_state' to '6' ('Resolved')
+     
+I<INCIDENT> is an B<FNAL::Nagios::Incident> object with an included incident   
+number.  Valid options for the ARGS hash:
+
+    text    Text for the close message.
+
+Returns an error if there is one, or undef on success.
+
+=cut
+
+sub snowRecovery {
+    my ($incident, %args) = @_;
+    my $text = $args{'text'} || 'unknown text';
+
+    if (my $number = $incident->incident) {
+        debug ("Updating '$number' on Service Now");
+        $SN->tkt_update ($number,
+            'closed_by'      => $CONFIG->{ticket}->{caller_id},
+            'close_code'     => 'Other (must describe below)',
+            'close_notes'    => $text,
+            'incident_state' => '6',
+        ) or return 'error on incident update';
+    } else {
+        return 'no incident number';
+    }
+    return;
+}
+
+=item snowReset (INCIDENT, ARGS)
+
+Resets an existing incident.  This consists of:
+
+    * Re-opens the incident with 'incident_state' to '1' ('Open')
+     
+I<INCIDENT> is an B<FNAL::Nagios::Incident> object with an included incident   
+number.  Valid options for the ARGS hash:
+
+    text    Text for the reopen message.
+
+Returns an error if there is one, or undef on success.
+
+=cut
+
+sub snowReset {
+    my ($incident, %args) = @_;
+    my $text = $args{'text'} || 'unknown text';
+    if (my $number = $incident->incident) {
+        debug ("Updating '$number' on Service Now");
+        $SN->tkt_update ($number, {
+              'incident_state' => '1',
+              'watch_list'     => $CONFIG->{ticket}->{watch_list}
+        }) or return 'error on incident update';
+
+        debug ("Adding comments entry to '$number'");
+        $SN->tkt_update ($number, {
+            'type'       => 'comments',
+            'work_notes' => $text
+        }) or return 'error on journal update';
+    } else {
+        return 'no incident number';
+    }
+    return;
+}
+
+
+=item usernameByName (NAME)
+
+Looks up the username of a given I<NAME>, as defined as "the part before the
+@fnal.gov".  This may be better put into FNAL::SNOW some day.
 
 =cut
 
@@ -489,7 +576,106 @@ sub _nagios_url_cmk_svc {
 
 =head1 CONFIGURATION FILE 
 
-[...]
+The configuration is stored in I</etc/fnal/nagios.yaml>.  This file is
+YAML-formatted, and should contain at least the following fields:
+
+=over 2
+
+=item cachedir
+
+This directory will be used to store B<FNAL::Nagios::Incident> objects.
+
+=item nagios
+
+=over 2
+
+=item ack
+
+These should be set in any scripts that use this data.
+
+=over 2
+
+=item author
+
+Who sent the ACK?
+
+=item comment
+
+Text assicated with the ACK.
+
+=back
+
+=item cmdPipe
+
+Nagios lets us send commands back to the service by dropping text into a
+specific file.  This is the name of that file.
+
+=item errorMail
+
+Configuration for how the emails will look that are sent on error.
+
+=over 2
+
+=item to
+
+Who do the errors go to?
+
+=item from
+
+Who do the errors come from?
+
+=item subjectPrefix
+
+Goes at the start of the subject line.
+
+=back
+
+=item livestatus
+
+This module assumes that you are using Livestatus to query Nagios for
+information regarding its current state.  
+
+=over 2
+
+=item default
+
+Default location of the named pipe, if the F<site> is I<default>.
+
+=item prefix, suffix
+
+If we are using style 'check_mk', we will look for the named pipe in 
+the file I<prefix>/F<site>/I<suffix>.
+
+=back
+
+=item site
+
+Used when writing up check_mk style URLs, this should be set to the equivalent
+of $ENV{OMD_SITE} by any scripts that care about such things.
+
+=item style
+
+What type of nagios service is this?  Valid choices: 'check_mk' or 'nagios'.
+This is used to decide how to write up longer URLs.
+
+=item url
+
+Default URL for connecting to this nagios instance.  This is used as a 
+template for longer URLs, and you do not need the trailing '/'.
+
+=back
+
+=item snowConfig
+
+Location of the B<FNAL::SNOW::Config> configuration yaml file.
+
+=item ticket
+
+This should contain a list of default values for tickets created by this 
+suite.  Feel free to add whichever fields you want, but taking them out
+may be dangerous.
+
+=back
 
 =head1 REQUIREMENTS
 

@@ -33,6 +33,22 @@ if [[ $RPM_BUILD_ROOT != "/" ]]; then
 fi
 
 rsync -Crlpt ./usr ${RPM_BUILD_ROOT}
+rsync -Crlpt ./etc ${RPM_BUILD_ROOT}
+
+mkdir -p ${RPM_BUILD_ROOT}/usr/share/perl5/vendor_perl
+rsync -Crlpt ./lib/ ${RPM_BUILD_ROOT}/usr/share/perl5/vendor_perl
+
+mkdir -p ${RPM_BUILD_ROOT}/usr/share/man/man1
+for i in `ls usr/sbin`; do
+    pod2man --section 8 --center="System Commands" usr/sbin/${i} \
+        > ${RPM_BUILD_ROOT}/usr/share/man/man8/${i}.8 ;
+done
+
+mkdir -p ${RPM_BUILD_ROOT}/usr/share/man/man3
+pod2man --section 3 --center="Perl Documentation" lib/FNAL/Nagios.pm \
+        > ${RPM_BUILD_ROOT}/usr/share/man/man3/FNAL::Nagios.3
+pod2man --section 3 --center="Perl Documentation" lib/FNAL/Nagios/Incident.pm \
+        > ${RPM_BUILD_ROOT}/usr/share/man/man3/FNAL::Nagios::Incident.3
 
 %clean
 # Adding empty clean section per rpmlint.  In this particular case, there is 
@@ -40,6 +56,10 @@ rsync -Crlpt ./usr ${RPM_BUILD_ROOT}
 
 %files
 /usr/lib64/nagios/plugins/check_nexsan
+/usr/sbin/*
+/usr/share/man/man3/*
+/usr/share/man/man8/*
+/usr/share/perl5/vendor_perl/FNAL/*
 
 %changelog
 * Mon Jul 07 2014   Tim Skirvin <tskirvin@fnal.gov>   0-1

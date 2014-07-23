@@ -2,20 +2,20 @@
 
 =head1 NAME
 
-nagios-to-snow - integrates Nagios and ServiceNow Incidents
+nagios-to-snow - integrates Nagios and Service Now Incidents
 
 =head1 SYNOPSIS
 
-B<nagios-to-snow> --type I<PROBLEM|ACKNOWLEDGE|RECOVERY> < I<STDIN>
+B<nagios-to-snow> --type I<PROBLEM|ACK|RECOVERY> < I<STDIN>
 
 =head1 DESCRIPTION
 
-nagios-to-snow creates and manages incidents in Service Now based on inputs
-from Nagios.  This generally consists of three types of actions: PROBLEM
+nagios-to-snow creates and manages Incidents in Service Now based on alerts
+from Nagios.  This generally requires supporting three types of alert: PROBLEM
 (creates a ticket), ACK (updates the ticket), and RECOVERY (closes the ticket).
 
-Logs of open tickets are stored in a central directory (defined in a central
-configuration file).
+Logs of open incidents are stored in a central directory (set in the
+B<FNAL::Nagios::Incident> library.
 
 =cut
 
@@ -23,16 +23,11 @@ configuration file).
 ### Configuration ############################################################
 ##############################################################################
 
-use lib '/home/tskirvin/rpm/fnal-snow/lib';
-use lib '/home/tskirvin/rpm/cms-monitor/lib';
-our $CONFIG_FILE = '/home/tskirvin/rpm/cms-monitor/etc/snow/nagios.yaml';
+use lib '/home/tskirvin/rpm/fnal-nagios/lib';
+our $CONFIG_FILE = '/home/tskirvin/rpm/fnal-nagios/etc/fnal/nagios.yaml';
 
 ## Load the central configuration file now.
 our $CONFIG = FNAL::Nagios->load_yaml ($CONFIG_FILE);
-
-## If set, print debugging information as we go and send error mails to 
-## STDOUT instead.  Defaults to 0, can be set with '--debug'.
-our $DEBUG = 0;
 
 ## OMD == Open Monitoring Distribution
 our $OMD_SITE = $ENV{'OMD_SITE'} || 'default';
@@ -47,7 +42,7 @@ $CONFIG->{nagios}->{ack}->{author} ||= $USER;
 
 use strict;
 use warnings;
-use vars qw/$CI $SN $TYPE/;
+use vars qw/$CI $SN $TYPE $PROBLEM_ID $LAST_PROBLEM_ID/;
 
 use FNAL::Nagios qw/debug error_mail set_config/;
 use FNAL::Nagios::Incident;
@@ -61,68 +56,220 @@ $|++;
 ### Subroutines ##############################################################
 ##############################################################################
 
-### error_usage (ERROR)
-# Exit out with pod2usage.
+=head1 OPTIONS
 
-sub error_usage {
-    my ($error) = @_;
-    pod2usage (-exit_status => 2, -verbose => 1);
-}
+=head2 REQUIRED
 
-### make_notes (MSG)
-# Generate a formatted error message for text fields in SN.  
+=over 4
 
-sub make_notes {
-    my @return;
-    while (@_) { push @return, sprintf ("<b>%s</b>: %s", shift, shift) }
-    return "[code]<br />" . join('<br />', @return) . "[/code]"
-}
+=item B<--ciname> I<HOSTNAME>
+
+Host name of the system affected by this alert.  This will be used for the
+B<cmdb_ci> field in the resulting ticket, as well as the overall host/service
+name pair.
+
+=item B<--type> [PROBLEM|ACK|RECOVERY]
+
+What kind of alert is this?
+
+=back
+
+=head2 OPTIONAL
+
+=over 4
+
+=item B<--debug>
+
+If set, we will print debugging messages on the way.  Default: off.
+
+=item B<--filepath> I<PATH>
+
+Where should we look for B<FNAL::Nagios::Incident> files?  The default is 
+defined in F</srv/monitor/nagios-incidents>, but it is actually defined in 
+the YAML configuration file (see B<FNAL::Nagios>).
+
+=item B<--lastserviceproblemid> I<ID>
+
+This is an INT that should come from the Nagios field
+I<$LASTSERVICEPROBLEMID$>.  We use it to determine the problem ID for creating
+the local Nagios incident file; it does not correspond to anything in the
+ticket.
+
+=item B<--omdsite> I<SITE>
+
+What is our OMD (Open Monitoring Distribution) site?  Defaults to
+F<default>.
+
+=item B<--servicename> I<NAME>
+
+What is the service name affected by this alert?  This will be used for the
+B<servicename> field in the resulting ticket, as well as the overall
+host/service name pair.
+
+No default, and not required (if we don't get this, we'll assume that this
+alert affects the entire host).
+
+=item B<--serviceproblemid> I<ID>
+
+This is an INT that should come from the Nagios field I<$SERVICEPROBLEMID$>.  
+We use it to determine the problem ID for creating the local Nagios incident
+file; it does not correspond to anything in the ticket.
+
+=item B<--state> [UP|DOWN]
+
+Nagios state for specified asset.  
+
+=item B<--snconfig> I<YAMLFILE>
+
+Our Service Now configuration - URL, username, password, comes from
+an external YAML file.  We can override this if necessary.  The
+default is F</etc/snow/config.yaml> (and note that this is defined in
+B<FNAL::SNOW::Config>.
+
+=back
+
+=head2 TICKET CONFIGURATION
+
+These fields correspond to specific fields in Service Now, and are primarily
+used at ticket creation.
+
+Defaults for these fields are set in the configuration YAML.  You will probably
+have to set some sub-set of these fields in order to get anything useful done
+with this script.
+
+=over 4
+
+=item B<--assignmentgroup> I<GROUP>
+
+Corresponds to I<assignment_group>.
+
+=item B<--caller> I<NAME>
+
+Corresponds to I<caller_id>.
+
+=item B<--category> I<NAME>
+
+Corresponds to I<u_categorization>.
+
+=item B<--impact> [1-5]
+
+Corresponds to I<impact>.
+
+=item B<--incident> I<STRING>
+
+Corresponds to I<incident_number>.
+
+=item B<--page> I<NUMBER>
+
+If non-zero, page the primary upon ticket creation.  Corresponds to
+I<u_page_primary>.
+
+=item B<--state> I<STATE>
+
+Corresponds to I<state>.
+
+=item B<--subject> I<STRING>
+
+Corresponds to I<short_description>.
+
+=item B<--urgency> [1-5]
+
+Corresponds to I<urgency>.
+
+=back
+
+=head2 EMAIL INTEGRATION
+
+Some errors result in reports being sent via email.
+
+=over 4
+
+=item B<--emailerrorlist> I<ADDRESS>
+
+Who should errors be sent to?
+
+=item B<--emailfrom> I<ADDRESS>
+
+Who should errors be sent from?
+
+=back
+
+=head2 NAGIOS ACKNOWLEDGEMENTS
+
+When we get an ACK, we also need the following fields.
+
+=over 4
+
+=item B<--ackauthor> I<USERNAME>
+
+Assigns the ticket ownership from on an ACK.
+
+=item B<--ackcomment> I<TEXT>
+
+The text of the journal entry created on an ACK.
+
+=back
+
+=head2 OTHER
+
+=over 4
+
+=item B<--help>
+
+Prints out basic full help documentation and exits.
+
+=item B<--man>
+
+Prints out the full help documentation and exits.
+
+=back
+
+=cut
 
 ### parse_options ()
-# This Getopt::Long::Parser call was getting long and unwieldy, so 
-# let's move it to its own function.
+# The Getopt::Long::Parser call was getting long and unwieldy.
 
 sub parse_options {
     my $parser = Getopt::Long::Parser->new();
     my $result = $parser->getoptions (
 
         ## Required Parameters
-        't|type=s'    => \$TYPE,
-        'ci|ciName=s' => \$CI,
-    
+        't|type=s'         => \$TYPE,
+        'host|ci|ciname=s' => \$CI,
+
         ## Optional Parameters
-        'd|debug'   => \$FNAL::Nagios::DEBUG,
-        'omdSite=s' => \$OMD_SITE,
-    
+        'd|debug'                => \$FNAL::Nagios::DEBUG,
+        'lastserviceproblemid=s' => \$LAST_PROBLEM_ID,
+        'omdsite=s'              => \$OMD_SITE,
+        'serviceproblemid=s'     => \$PROBLEM_ID,
+
         ## Basic level configuration parameters
-        'filePath=s' => sub { set_config ('cachedir' => $_[1]) },
-        'snConfig=s' => sub { set_config ('snowConfig' => $_[1]) },
-    
+        'filepath=s' => sub { set_config ('cachedir'   => $_[1]) },
+        'snconfig=s' => sub { set_config ('snowConfig' => $_[1]) },
+
         ## Incident fields that do match the field name
-        'category=s'             => sub { set_ticket (@_) },
         'impact=i'               => sub { set_ticket (@_) },
-        'lastServiceProblemID=s' => sub { set_ticket (@_) },
-        'serviceName=s'          => sub { set_ticket (@_) },
-        'serviceProblemID=s'     => sub { set_ticket (@_) },
+        'servicename=s'          => sub { set_ticket (@_) },
         'state=s'                => sub { set_ticket (@_) },
         'urgency=i'              => sub { set_ticket (@_) },
-        'assignmentGroup=s'      => sub { set_ticket (@_) },
+        'assignmentgroup=s'      => sub { set_ticket (@_) },
 
         ## Incident fields that don't quite match the field name
         'caller=s'   => sub { set_ticket ('caller_id'         => $_[1]) },
+        'category=s' => sub { set_ticket ('u_categorization'  => $_[1]) },
         'incident=s' => sub { set_ticket ('incident_number'   => $_[1]) },
         'page=i'     => sub { set_ticket ('u_page_primary'    => $_[1]) },
         'subject=s'  => sub { set_ticket ('short_description' => $_[1]) },
-    
+
         ## Error email fields
-        'emailFrom=s'      => sub { set_nagios ('errorMail', 'from', @_ ) },
-        'emailErrorList=s' => sub { set_nagios ('errorMail', 'to',   @_ ) },
-    
+        'emailfrom=s'      => sub { set_nagios ('errorMail', 'from', @_ ) },
+        'emailerrorlist=s' => sub { set_nagios ('errorMail', 'to',   @_ ) },
+
         ## Nagios acknowledgement information
-        ## TODO - ackAuthor will be a long string; have to get the username out of it
-        'ackAuthor:s'      => sub { set_nagios ('ack', 'author',  $_[1] ) },
-        'ackComment:s'     => sub { set_nagios ('ack', 'comment', $_[1] ) },
-    
+        ## TODO - ackAuthor will be a long string; have to get the username out
+        'ackauthor:s'      => sub { set_nagios ('ack', 'author',  $_[1] ) },
+        'ackcomment:s'     => sub { set_nagios ('ack', 'comment', $_[1] ) },
+
         ## Help functionality
         'man'    => sub { pod2usage (-verbose => 2, -noperldoc => 1) },
         'h|help' => sub { pod2usage (-verbose => 1) }) || error_usage ();
@@ -132,7 +279,9 @@ sub parse_options {
 
     unless ($TYPE) { error_usage ("no '--type' offered") }
     unless ($CI)   { error_usage ("no '--ciname' offered") }
- 
+
+    set_ticket ('cmdb_ci', $CI);
+
     return $parser;
 }
 
@@ -160,11 +309,11 @@ sub process_ack {
     my $fileAck = $incident->ack || 'unknown';
     if ($fileAck eq 'unknown') {
         debug "$fileIncNumber: acknowledging";
-        my $return = FNAL::Nagios::incidentAck ($incident,
+        my $return = FNAL::Nagios::snowAck ($incident,
             'text' => $CONFIG->{nagios}->{ack}->{comment},
             'user' => $CONFIG->{nagios}->{ack}->{author}
         );
-        if ($return) { 
+        if ($return) {
             error_mail ($prefix, $description, "failed to update: '$return'");
         } else {
             debug ("Creating FNAL::Nagios::Incident file for '$svcName'");
@@ -179,13 +328,10 @@ sub process_ack {
 }
 
 ### process_problem (svcName, description)
-# 
+# Process a new problem.
 sub process_problem {
     my ($svcName, $description) = @_;
     my $prefix = "PROBLEM $svcName";
-
-    set_ticket ('description', $description);
-    set_ticket ('cmdb_ci',     $svcName);
 
     debug ("Do we already have an incident for '$svcName'?");
     if ( my $inc = FNAL::Nagios::Incident->read ($svcName) ) {
@@ -199,7 +345,7 @@ sub process_problem {
     $incident->site ($CONFIG->{nagios}->{site});
 
     debug ("Creating incident for '$svcName'");
-    my $number = FNAL::Nagios::incidentCreate ($incident,
+    my $number = FNAL::Nagios::snowCreate ($incident,
         'ticket' => $CONFIG->{ticket}
     );
     unless ($number && $number =~ /^\w+\d+$/) {
@@ -214,7 +360,7 @@ sub process_problem {
 }
 
 ### process_recovery (svcName, description)
-#
+# Process a host/service recovery
 
 sub process_recovery {
     my ($svcName, $description) = @_;
@@ -227,16 +373,24 @@ sub process_recovery {
     }
 
     debug ("Telling SN that host/service '$svcName' has recovered");
-    my $return = FNAL::Nagios::incidentRecovery ($incident,
+    my $return = FNAL::Nagios::snowRecovery ($incident,
         'text' => 'The host/service has been restored.');
-    if ($return) { 
+    if ($return) {
         error_mail ($prefix, $description, "failed to update: '$return'");
     } else {
         debug ("Removing FNAL::Nagios::Incident file for '$svcName'");
-        $incident->unlink or 
+        $incident->unlink or
             error_mail ($prefix, $description, "failed to unlink: $@");
     }
     return;
+}
+
+### error_usage (ERROR)
+# Exit out with pod2usage.
+
+sub error_usage {
+    my ($error) = @_;
+    pod2usage (-exit_status => 2, -verbose => 1);
 }
 
 ### set_nagios (FIELD, VALUE)
@@ -260,24 +414,28 @@ parse_options ();
 debug ("Getting text on STDIN");
 my $description = join ("\n", <>);
 chomp $description;
+set_ticket ('description', $description);
 
 my ($svcName, $url);
-if ($CONFIG->{ticket}->{serviceName} eq 'host') { $svcName = $CI } 
-else {
-    my $sname = $CONFIG->{ticket}->{serviceName};
-    my $id = $CONFIG->{ticket}->{serviceProblemID}
-          || $CONFIG->{ticket}->{lastServiceProblemID}
-          || 0;
-
+if ($CONFIG->{ticket}->{servicename} eq 'host') { 
+    $svcName = $CI 
+} else {
+    my $sname = $CONFIG->{ticket}->{servicename};
+    my $id = $PROBLEM_ID || $LAST_PROBLEM_ID || 0;
     $svcName = join (':', $CI, $sname, $id);
 }
 
 our $SN = FNAL::Nagios::connect_to_sn ($CONFIG);
 
-if    (lc $TYPE eq 'problem')  { process_problem  ($svcName, $description) }
-elsif (lc $TYPE eq 'recovery') { process_recovery ($svcName, $description) }
-elsif (lc $TYPE eq 'ack')      { process_ack      ($svcName, $description) }
-else                           { error_usage ("unknown type: '$TYPE'") }
+if    (lc $TYPE eq 'problem')  {
+    process_problem  ($svcName, $description)
+} elsif (lc $TYPE eq 'recovery') {
+    process_recovery ($svcName, $description)
+} elsif (lc $TYPE eq 'ack|acknowledgement') {
+    process_ack      ($svcName, $description)
+} else {
+    error_usage ("unknown type: '$TYPE'")
+}
 
 exit 0;
 
@@ -285,105 +443,33 @@ exit 0;
 ### Final Documentation ######################################################
 ##############################################################################
 
-=head1 OPTIONS
+=head1 FILES
 
 =over 4
 
-=item B<-page>
+=item B</etc/fnal/nagios.yaml>
 
-Values <0|1>: Execute paging operation within ServiceNow upon ticket creation.
+Configuration for our local nagios instance and default ticket configuration.
+See B<FNAL::Nagios> for details.
 
-=item B<-urgency>
+=item B</etc/snow/config.yaml>
 
-Values [1-5]: ServiceNow urgency value
+Configuration to connect to Service Now; see B<FNAL::SNOW::Config> for
+details.  This can be overridden with B<--snconfig>.
 
-=item B<-impact>
+=item B</srv/monitor/nagios-incidents>
 
-Values [1-5]: ServiceNow impact value
-
-=item B<-ciname>
-
-String: Hostname of the machine, will be used within the CI field of ServiceNow
-
-=item B<-type>
-
-Values [PROBLEM|RECOVERY|ACKNOWLEDGEMENT]
-
-=item B<-state>
-
-Values [UP|DOWN]: Nagios state for specified asset
-
-=item B<-subject>
-
-String: ServiceNow subject field used in the creation of a new ticket.
-
-=item B<-incident>
-
-String: ServiceNow incident number
-
-=item B<-ackauthor>
-
-String: Value used to assign ticket ownership within ServiceNow
-
-=item B<-ackcomment>
-
-String: Value inserted into journal entry of ServiceNow while
-acknowledging a ticket
-
-=item B<-categorization>
-
-String: ServiceNow u_categorization field
-
-=item B<-assignmentGroup>
-
-String: ServiceNow group which should be assigned the newly created ticket
-
-=item B<-caller>
-
-String: ServiceNow caller_id field
-
-=item B<-filepath>
-
-String: Location where Nagios incident files should be stored
-
-=item B<-snURL>
-
-String: ServiceNow URL
-
-=item B<-snUsername>
-
-String: ServiceNow Username
-
-=item B<-snPassword>
-
-String: ServiceNow Password
-
-=item B<--type> F<TYPE>
-
-What kind of update is this?  Must be one of the following: PROBLEM,
-ACKNOWLEDGEMENT, or RECOVERY.  Required.
-
-=item B<--help>
-
-Prints out basic full help documentation and exits.
-
-=item B<--man>
-
-Prints out the full help documentation and exits.
+Directory for B<FNAL::Nagios::Incident> files listing currently-active
+incidents.  Files are created here on a PROBLEM, updated on an ACK, and deleted
+on RECOVERY.  This directoy can be overridden with B<--filepath>.
 
 =back
 
-=head1 DATA FILES
+=head1 SEE ALSO
 
-=head1 SCHEMA
+B<FNAL::Nagios>, B<FNAL::Nagios::Incident>, B<FNAL::SNOW>
 
-=over 4
-
-=item Host Alerts
-
-=item Service Alerts
-
-=back 4
+B<snow-to-nagios>
 
 =head1 EXAMPLES
 
@@ -391,25 +477,24 @@ Prints out the full help documentation and exits.
 
 =item PROBLEM
 
-    echo -n "(sample)\n<==End of alert==>" | \
-        nagios-to-snow --type=PROBLEM \
-        --ciname=d0www  --state=DOWN \
-        --subject="Nagios Host Alert: Problem with d0www"
+    echo "(sample)" | nagios-to-snow --type PROBLEM \
+        --ci testing --state DOWN \
+        --subject "fake alert: problem with fake host testing" \
+        --omdsite testing --debug
 
-=item ACKNOWLEDGEMENT
+=item ACK
 
-    echo -n "(sample)\n<==End of alert==>" | \
-        nagios-to-snow --type=ACKNOWLEDGEMENT \
-        --ciname=d0www --state=DOWN \
-        --subject="Nagios Host Alert: Problem with d0www" \
-        --ackauthor="`whoami`" \
-        --ackcomment="This is a sample acknowledgment"
+    echo "(sample)" | nagios-to-snow --type ACK \
+        --ci testing --state DOWN \
+        --subject "fake alert: problem with fake host testing" \
+        --omdsite testing --debug
 
 =item RECOVERY
 
-    echo -n "(sample)\n<==End of alert==>" | \
-        nagios-to-snow --type=RECOVERY \
-        --ciname=d0www --state=UP
+    echo "(sample)" | nagios-to-snow --type RECOVERY \
+        --ci testing --state DOWN \
+        --subject "fake alert: problem with fake host testing" \
+        --omdsite testing --debug
 
 =back
 

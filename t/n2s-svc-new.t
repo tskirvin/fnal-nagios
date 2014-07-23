@@ -13,6 +13,6 @@
 
 echo "(sample)" | nagios-to-snow --type PROBLEM \
     --state DOWN \
-    --ciName testing_host --serviceName testing_svc \
+    --ci testing_host --servicename testing_svc \
     --subject "fake alert: problem with fake service testing" \
     --omdSite testing --debug

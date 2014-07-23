@@ -1,27 +1,39 @@
-# cachedir: '/srv/monitor/snow-incidents'
+### /etc/fnal/nagios.yaml
+### Configuration for FNAL::Nagios scripts
+
+## Where should we store FNAL::Nagios::Incident files?
+
+# cachedir: '/srv/monitor/nagios-incidents'
 cachedir: '/tmp/snow-incidents'
-snowConfig: '/etc/snow/config.yaml'
+
+## Nagios site-specific information.  You will definitely need to 
+## customize this to your local configuration.
 
 nagios:
     ack:
         author:
         comment:
+    cmdPipe: '/var/spool/nagios/cmd/nagios.cmd'
     errorMail:
         to:                 'tskirvin@fnal.gov'
         from:               'cms-nagios@fnal.gov'
         subjectPrefix:      'nagios'
     livestatus:
+        default: '/var/run/nagios/rw/live'
         prefix:  '/omd/sites'
         suffix:  'tmp/run/live'
-        default: '/var/run/nagios/rw/live'
-    prefix: 'uscms-t1'
     site:
     style:  'nagios'
     url:    'https://cms-monitor.fnal.gov/nagios'
 
+## Configuration file describing how we connect to Service Now.
+
+snowConfig: '/etc/snow/config.yaml'
+
 ## Default fields that will be created in a new ticket created with this
 ## package.  The programs should let you override necessary fields from
 ## the command line.
+
 ticket:
     assignment_group:       'CMS-CIS'
     caller_id:              'cd-srv-cmdb'

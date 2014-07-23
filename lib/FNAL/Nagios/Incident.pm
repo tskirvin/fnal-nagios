@@ -2,11 +2,44 @@ package FNAL::Nagios::Incident;
 
 =head1 NAME
 
-FNAL::Nagios::Incident - 
+FNAL::Nagios::Incident - data files for tracking nagios/SN incidents
 
 =head1 SYNOPSIS
 
+  use FNAL::Nagios::Incident;
+
+  my $i1 = FNAL::Nagios::Incident->create ('testing')
+    or die "could not create new incident for 'testing'";
+  $i1->incident('INC0000000000001');
+  $i1->write or die "could not write\n";
+
+  my $i2 = FNAL::Nagios::Incident->read ('testing')
+    or die "could not open existing incident for 'testing'";
+  $i2->ack('yes');
+  $i2->write or die "could not write\n";
+
+  my $i3 = FNAL::Nagios::Incident->read ('testing')
+    or die "could not open existing incident for 'testing'";
+  $i3->unlink or die "failed to unlink: $@\n";
+
 =head1 DESCRIPTION
+
+FNAL::Nagios::Incident manages data files for tracking Nagios incidents and
+their relaion to Service Now.  It 
+
+=head1 DATA STRUCTURE
+
+This object is a B<Class::Stuct> object with the following fields:
+
+    ack         Is this incident ack'd in Nagios?  
+    filename    Where is this incident written/going to be written?
+    incident    Incident number
+    site        OMD_SITE value for this incident
+    sname       'host:svc:id' or 'host'
+
+F<sname> requiers a bit of explanation.  If this is a host alert, then we only
+need the hostname; if it's a service alert, we need the hostname, service name,
+and (if available) the ID of previous alerts (an ID, defaults to 0).
 
 =cut
 
@@ -15,8 +48,6 @@ FNAL::Nagios::Incident -
 ##############################################################################
 
 our $BASEDIR = '/srv/monitor/snow-incidents';
-
-our $SN = undef;
 
 ##############################################################################
 ### Declarations #############################################################
@@ -42,11 +73,16 @@ struct 'FNAL::Nagios::Incident' => {
 
 =head1 FUNCTIONS
 
+Not listed: the getter/setter and initialization functions associated with
+B<Class::Struct>.
+
 =over 4
 
-=item ack
+=item create (SVCNAME)
 
-=item create
+Create a new object based on the name I<SVCNAME>, which should either match
+F<host|svcname|id> or F<host>.  Sets the filename and sname, and returns the
+new object.
 
 =cut
 
@@ -59,11 +95,9 @@ sub create {
     return $self;
 }
 
-=item filename
-
 =item host
 
-[...]
+Get the hostname of the alert out of B<sname()>.
 
 =cut
 
@@ -73,16 +107,30 @@ sub host {
     return $host;
 }
 
-=item incident
+=item id
+
+Get the ID of the alert out of B<sname()>.
+
+=cut
+
+sub id {
+    my ($self) = @_;
+    my ($host, $service, $id) = split (':', $self->sname);
+    return $id;
+}
 
 =item print 
+
+Creates a printable string summarizing the content of this object.  Returns
+either an array of the lines joined with newlines, or the array itself.
 
 =cut
 
 sub print {
     my ($self) = @_;
     my @return;
-    push @return, sprintf ("%15s  Host: %-14.14s  Service: %-14.14s  Site: %-10s",
+    push @return, sprintf (
+        "%15s  Host: %-14.14s  Service: %-14.14s  Site: %-10s",
         $self->incident || '(unknown)', 
         $self->host     || '', 
         $self->service  || '()', 
@@ -94,6 +142,8 @@ sub print {
 }
 
 =item read
+
+Read in an existing object, and returns the object.
 
 =cut
 
@@ -137,6 +187,8 @@ sub read_dir {
 
 =item service
 
+Get the service name of the alert out of B<sname()>.
+
 =cut
 
 sub service {
@@ -147,6 +199,10 @@ sub service {
 
 =item set_incident
 
+Set the incident number of the object to the full, long-incident name string.
+This is necessary because we will occasionally just use the short name of the 
+incident number (e.g. '1' instead of 'INC000000000001').
+
 =cut
 
 sub set_incident {
@@ -156,9 +212,9 @@ sub set_incident {
     return $self->incident;
 }
 
-=item sname
-
 =item unlink
+
+Remove the file.
 
 =cut
 
@@ -169,6 +225,8 @@ sub unlink {
 }
 
 =item write
+
+Write out the file.
 
 =cut
 
@@ -216,7 +274,7 @@ B<Class::Struct>
 
 =head1 SEE ALSO
 
-B<snow-alert-create>
+B<nagios-to-snow>, B<snow-to-nagios>
 
 =head1 AUTHOR
 

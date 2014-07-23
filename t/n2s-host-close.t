@@ -14,4 +14,4 @@
 echo "(sample)" | nagios-to-snow --type RECOVERY \
     --ci testing --state DOWN \
     --subject "fake alert: problem with fake host testing" \
-    --omdSite testing --debug
+    --omdsite testing --debug

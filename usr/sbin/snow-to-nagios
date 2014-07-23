@@ -199,7 +199,7 @@ foreach my $incident (@incidents) {
         } else {
             print_1 ('NOTICE',
                 'Nagios should have closed this ticket already, closing');
-            my $return = FNAL::Nagios->incidentRecovery ($number,
+            my $return = FNAL::Nagios::snowRecovery ($number,
                 'text' => 'host/service has recovered');
             if ($return) {
                 print_error ("error on incidentRecovery: $return");
@@ -215,7 +215,7 @@ foreach my $incident (@incidents) {
         if ($incAck ne "yes") {
             my $text = "resolved in SN, Nagios still sees problem; resetting";
             print_error ($text);
-            if (my $return = FNAL::Nagios->incidentReset ($number,
+            if (my $return = FNAL::Nagios::snowReset ($number,
                 'text' => $text)) {
                 print_error ("error on incidentReset: $return");
             }
