@@ -3,8 +3,7 @@
 
 ## Where should we store FNAL::Nagios::Incident files?
 
-# cachedir: '/srv/monitor/nagios-incidents'
-cachedir: '/tmp/snow-incidents'
+cachedir: '/srv/monitor/nagios-incidents'
 
 ## Nagios site-specific information.  You will definitely need to 
 ## customize this to your local configuration.
