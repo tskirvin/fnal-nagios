@@ -108,16 +108,15 @@ sub nagiosSocketService {
        'Columns: services_with_state', "Filter: host_name = $host");
     return undef unless $nagiosLookup;
     if (exists $nagiosLookup->[0]) {
-        my $arrayLength=length($nagiosLookup->[0]);
+        my $item = $nagiosLookup->[0];
+        my $arrayLength=length($item);
         for (my $count = 0; $count < $arrayLength; $count++) {
-            if (exists $nagiosLookup->[0][$count] &&
-        $nagiosLookup->[0][$count][0] eq $service &&
-                $nagiosLookup->[0][$count][1] == 0) {
+            if (exists $$item[$count] &&
+                $$item[$count][0] eq $service &&
+                $$item[$count][1] == 0) {
                 return 1;
-            } elsif (! exists $nagiosLookup->[0][$count]) {
+            } elsif (! exists $$item[$count]) {
                 return 2;
-            } else {
-                return 0;
             }
         }
         return 0;
