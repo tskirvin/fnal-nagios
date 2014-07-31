@@ -62,7 +62,7 @@ pod2man --section 3 --center="Perl Documentation" lib/FNAL/Nagios/Incident.pm \
 /usr/share/man/man3/*
 /usr/share/man/man8/*
 /usr/share/perl5/vendor_perl/FNAL/*
-/srv/monitor/nagios-instances/.HOLD
+/srv/monitor/nagios-incidents/.HOLD
 
 %changelog
 * Mon Jul 23 2014   Tim Skirvin <tskirvin@fnal.gov>   0-2

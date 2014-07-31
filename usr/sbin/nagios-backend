@@ -215,7 +215,7 @@ sub sched_host {
 sub sched_service {
     my ($host, $service, $time) = @_;
     error_usage ("Usage: schedule service HOST SERVICE WHEN")
-        unless ($host && $$service);
+        unless ($host && $service);
     FNAL::Nagios::schedule_next ('host' => $host, 'service' => $service,
         'minutes' => 0, 'start' => time, 'user' => $USER);
     error_usage ("Usage: schedule service HOST SERVICE WHEN")
