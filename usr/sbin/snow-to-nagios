@@ -2,7 +2,7 @@
 
 =head1 NAME
 
-snow-to-nagios - 
+snow-to-nagios - use data from Service Now to manage Nagios tickets
 
 =head1 SYNOPSIS
 
@@ -12,7 +12,7 @@ snow-to-nagios -
 
 =head1 DESCRIPTION
 
-Scan open Service Now incidents and reopen tickets as necessary.  This 
+Scan open Service Now incidents and reopen tickets as necessary.  This
 script will also take assignment events from SNOW and apply them to Nagios.
 
 =cut
@@ -65,9 +65,9 @@ sub nagiosSocket {
     } else {
         $socket = $ls->{'default'}
     }
-    unless (-r $socket) { 
-        print_error ("'$socket' does not exist"); 
-        return undef 
+    unless (-r $socket) {
+        print_error ("'$socket' does not exist");
+        return undef
     }
     my $ml = Monitoring::Livestatus->new(
         socket   => $socket,
@@ -78,32 +78,46 @@ sub nagiosSocket {
     return $ml->selectcol_arrayref ($query);
 }
 
-### nagiosHostService (HOST)
-# 
+### nagiosHostService (SITE, HOST)
+# Returns undef if we were unable to connect to the socket; 0 if there is a
+# host problem; 1 if the host problem is gone; and 2 if the host itself is gone.
 
 sub nagiosHostService {
     my ($site, $host) = @_;
     my @query = ('GET hosts', 'Columns: state host_name',
         "Filter: host_name = $host");
     my $nagiosLookup = nagiosSocket ($site, @query);
+    return undef unless $nagiosLookup;
     if (exists $nagiosLookup->[0]) {
         if ($nagiosLookup->[0] == 0) { return 1 }
         else                         { return 0 }
+    } else {
+        return 2;
     }
     return undef
 }
 
-### nagiosSocketService (
+### nagiosSocketService (SITE, HOST, SERVICE)
+# Returns undef if we were unable to connect to the socket; 0 if there is a
+# service problem; 1 if the service problem is gone; and 2 if the service itself
+# is gone.
+
 sub nagiosSocketService {
     my ($site, $host, $service) = @_;
-    my $nagiosLookup = nagiosSocket ($site, 'GET hosts', 
+    my $nagiosLookup = nagiosSocket ($site, 'GET hosts',
        'Columns: services_with_state', "Filter: host_name = $host");
+    return undef unless $nagiosLookup;
     if (exists $nagiosLookup->[0]) {
         my $arrayLength=length($nagiosLookup->[0]);
         for (my $count = 0; $count < $arrayLength; $count++) {
-            if ($nagiosLookup->[0][$count][0] eq $service &&
+            if (exists $nagiosLookup->[0][$count] &&
+        $nagiosLookup->[0][$count][0] eq $service &&
                 $nagiosLookup->[0][$count][1] == 0) {
                 return 1;
+            } elsif (! exists $nagiosLookup->[0][$count]) {
+                return 2;
+            } else {
+                return 0;
             }
         }
         return 0;
@@ -126,7 +140,7 @@ my $result = $parser->getoptions (
 
 $FNAL::Nagios::Incident::BASEDIR = $CONFIG->{cachedir};
 my @incidents = FNAL::Nagios::Incident->read_dir ($CONFIG->{cachedir});
-unless (scalar @incidents) { 
+unless (scalar @incidents) {
     debug ("no matching incidents, exiting");
     exit 0
 }
@@ -200,7 +214,7 @@ foreach my $incident (@incidents) {
         } else {
             print_1 ('NOTICE',
                 'Nagios should have closed this ticket already, closing');
-            my $return = FNAL::Nagios::snowRecovery ($number,
+            my $return = FNAL::Nagios::snowRecovery ($incident,
                 'text' => 'host/service has recovered');
             if ($return) {
                 print_error ("error on incidentRecovery: $return");
@@ -232,22 +246,20 @@ foreach my $incident (@incidents) {
 
     ## If it was assigned in SNOW, count it as acknowledged in Nagios
     else {
-        if (lc $incAck eq 'yes') { 
+        if (lc $incAck eq 'yes') {
             print_1 ('Acknowledged', 'Yes');
         } else {
             print_1 ('Acknowledged', 'Not Yet');
-        
-            if (! $assigned) { 
-                print_1 ('Acknowledged', 'No');
-            } else {
+
+            if ($assigned) {
                 my $username = FNAL::Nagios::usernameByName ($assigned);
                 if ($username) {
                     if (my $return = FNAL::Nagios::ack (
-                        'host'    => $host, 
+                        'host'    => $host,
                         'service' => $service,
                         'comment' => "$number: ack'd within SNOW",
                         'user'    => $username,
-                        'site'    => $site 
+                        'site'    => $site
                     )) {
                         print_error ("failed to write to nagios: $return");
                         next;
