@@ -73,8 +73,14 @@ my $result = $parser->getoptions (
     'man'      => sub { pod2usage (-verbose => 2, -noperldoc => 1) },
     'h|help'   => sub { pod2usage (-verbose => 1) }) || error_usage ();
 
-my ($query, @rest) = @ARGV;
+my ($query, $type, @rest) = @ARGV;
 error_usage ("no query provided") unless $query;
+
+my @args;
+foreach my $a (@rest) { 
+    if ($a =~ m%/%) { push @args, split ('/', $a) }
+    else            { push @args, $a }
+}
 
 our $CONFIG = FNAL::Nagios->load_yaml;
 
@@ -92,7 +98,6 @@ service name, and B<COMMENT> is some explanatory text explaning why it's down.
 =cut
 
 if      (lc $query eq 'ack') {
-    my ($type, @args) = @rest;
     if    (lc $type eq 'host')    { ack_host (@args) }
     elsif (lc $type eq 'service') { ack_service (@args) }
     else                          { error_usage ("invalid ack type: $type") }
@@ -109,7 +114,6 @@ schedule, and B<COMMENT> is some explanatory text.
 =cut
 
 elsif (lc $query eq 'downtime') {
-    my ($type, @args) = @rest;
     if    (lc $type eq 'host')    { down_host (@args) }
     elsif (lc $type eq 'service') { down_service (@args) }
     else                          { error_usage ("invalid down type: $type") }
@@ -127,7 +131,6 @@ number of minutes you want to wait (defaults to 0).
 =cut
 
 elsif (lc $query eq 'schedule') {
-    my ($type, @args) = @rest;
     if    (lc $type eq 'host')    { sched_host (@args) }
     elsif (lc $type eq 'service') { sched_service (@args) }
     else                          { error_usage ("invalid sched type: $type") }

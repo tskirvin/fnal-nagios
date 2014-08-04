@@ -1,0 +1,323 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+nagios-report - create a human-readable report on current Nagios issues
+
+=head1 SYNOPSIS
+
+B<nagios-report>
+
+=head1 DESCRIPTION
+
+nagios-report generates a report on STDOUT summarizing the current state of
+systems in Nagios, specifically:
+
+    * Hosts that are currently not up (acknowledged and unknowledged)
+    * Services that are not currently OK, and are not covered by the host
+      being down (acknowledge and unacknowledged)
+
+The query uses B<Monitoring::Livestatus> to get the required information.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--site> I<SITE>
+
+Set the OMD_SITE name for choosing URLs and Livestatus file names.  Defaults 
+to 'default'; see B<FNAL::Nagios> for more details.
+
+=item B<-h>, B<--help>
+
+Prints out the synopsis information and exits.
+
+=item B<--man>
+
+Prints out a longer manual page and exits.
+
+=back
+
+=cut
+
+###############################################################################
+### Configuration #############################################################
+###############################################################################
+
+our $CONFIG_FILE = '/etc/fnal/nagios.yaml';
+our $CONFIG = FNAL::Nagios->load_yaml ($CONFIG_FILE);
+
+our $SITE = $ENV{'OMD_SITE'} || 'default';
+
+###############################################################################
+### Declarations ##############################################################
+###############################################################################
+
+use strict;
+use warnings;
+
+use Data::Dumper;
+use Getopt::Long;
+use FNAL::Nagios;
+use Monitoring::Livestatus;
+use POSIX qw/strftime/;
+use Pod::Usage;
+
+## When looking up hosts, we'll use these columns.
+our $HOST_COLS = join (' ', qw/host_name state plugin_output
+    comments_with_extra_info last_time_up last_time_down last_time_unreachable
+    last_state_change/);
+
+## When looking up services, we'll use these columns.
+our $SVC_COLS = join (' ', qw/host_name description state plugin_output
+    comments_with_extra_info last_time_ok last_time_warning last_time_critical
+    last_time_unknown last_state_change/);
+
+## Translate the Nagios state to a text value.
+our %STATE = ( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
+our %STATE_HOST = ( 0 => 'UP', 1 => 'DOWN', 2 => 'DOWN', 3 => 'DOWN' );
+
+###############################################################################
+### Subroutines ###############################################################
+###############################################################################
+
+### host_ack, host_unack
+# Find all host alerts that are acknowledged/unack'd.  Returns an array of 
+# hashrefs.
+sub host_ack {
+    _host_query (shift, "Filter: state >= 1", "Filter: acknowledged = 1")
+}
+sub host_unack {
+    _host_query (shift, "Filter: state >= 1", "Filter: acknowledged = 0")
+}
+
+### host_ack_text, host_unack_text
+# Returns two items: the number of matching items, and text describing these 
+# items.
+sub host_ack_text   { _text ("Acknowledged Host Alerts",     host_ack (shift)) }
+sub host_unack_text { _text ("Unacknowledged Host Alerts", host_unack (shift)) }
+
+### livestatus_socket (SITE, LS_CONFIG_OBJECT)
+# Creates a Monitoring::Livestatus object based on the file defined by
+# F<livestatus_socket_file()>.
+sub livestatus_socket {
+    my ($site, $ls) = @_;
+    my $file = livestatus_socket_file ($site, $ls);
+    unless (-r $file) { die "'$file' does not exist\n" }
+    my $ml = Monitoring::Livestatus->new(
+        socket   => $file,
+        warnings => 0,
+        timeout  => 10,
+    );
+    return $ml;
+}
+
+### livestatus_socket_file (SITE, LS_CONFIG_OBJECT)
+# Parses LS_CONFIG_OBJECT, which should be a hashref containing three 
+# values - key, prefix, and suffix - and returns the file name.  This may
+# eventually be put into FNAL::Nagios.
+sub livestatus_socket_file {
+    my ($site, $ls) = @_;
+    my $socket;
+    if ($site && lc $site ne 'default') {
+        $socket = join ('/', $ls->{'prefix'}, $site, $ls->{'suffix'})
+    } else {
+        $socket = $ls->{'default'}
+    }
+    return $socket;
+}
+
+### svc_ack, svc_unack
+# Find all service alerts that are acknowledged/unack'd and not associated 
+# with a down host.  Returns an array of hashrefs.
+
+sub svc_ack {
+    _svc_query (shift, "Filter: state >= 1", "Filter: acknowledged = 1",
+        "Filter: host_state = 0")
+}
+
+sub svc_unack {
+    _svc_query (shift, "Filter: state >= 1", "Filter: acknowledged = 0",
+        "Filter: host_state = 0")
+}
+
+
+### host_ack_text, host_unack_text
+# Returns two items: the number of matching items, and text describing these 
+# items.
+
+sub svc_ack_text    {
+    _text ("Acknowledged Service Alerts",     svc_ack (shift))
+}
+sub svc_unack_text  {
+    _text ("Unacknowledged Service Alerts", svc_unack (shift))
+}
+
+### text_host (HOST)
+# Returns a multi-line string describing the current state of host HOST (an
+# arrayref that came from _host_query().  This string will include the host
+# name, current status, relevant URL, and acknowledgement information if
+# relevant.
+sub text_host {
+    my ($host) = @_;
+
+    my @return;
+    push @return, sprintf ("%-45s  %-8s  %.23s", "$$host[0]",
+        $STATE_HOST{$$host[1]} || $STATE_HOST{3}, _text_time ($$host[7]));
+    push @return, sprintf ("  %-.78s", $$host[2]);
+    push @return, '  ' . FNAL::Nagios->nagios_url ($$host[0]);
+    if ($$host[3] && ref $$host[3] && $$host[3]->[0]) {
+        my $obj = $$host[3]->[0];
+        push @return, sprintf ("  ACK: %-48s  %.23s",
+            _text_person($$obj[1]), _text_time($$obj[4]) );
+        push @return, sprintf ("    %-.76s", $$obj[2]);
+    }
+
+    return wantarray ? @return : join ("\n", @return, '');
+}
+
+### text_svc (SVC)
+# Returns a multi-line string describing the current state of service SVC (an
+# arrayref that came from _svc_query().  This string will include the host
+# name, service name, current status, relevant URL, and acknowledgement 
+# information if relevant.
+sub text_svc {
+    my ($svc) = @_;
+
+    my @return;
+    push @return, sprintf ("%-45s  %-8s  %.23s", "$$svc[0]/$$svc[1]",
+        $STATE{$$svc[2]} || $STATE{3}, _text_time ($$svc[9]));
+    push @return, sprintf ("  %-.78s", $$svc[3]);
+    push @return, '  ' . FNAL::Nagios->nagios_url ($$svc[0], $$svc[1]);
+    if ($$svc[4] && ref $$svc[4] && $$svc[4]->[0]) {
+        my $obj = $$svc[4]->[0];
+        push @return, sprintf ("  ACK: %-48s  %.23s",
+            _text_person($$obj[1]), _text_time($$obj[4]) );
+        push @return, sprintf ("    %-.76s", $$obj[2]);
+    }
+
+    return wantarray ? @return : join ("\n", @return, '');
+}
+
+###############################################################################
+### main () ###################################################################
+###############################################################################
+
+my $parser = new Getopt::Long::Parser;
+my $result = $parser->getoptions (
+    'site'     => \$SITE,
+    'man'      => sub { pod2usage (-verbose => 2, -noperldoc => 1) },
+    'h|help'   => sub { pod2usage (-verbose => 1) }) || error_usage ();
+
+my $socket = livestatus_socket ($SITE, $CONFIG->{'nagios'}->{'livestatus'});
+
+my ($count_svc_ack,    $text_svc_ack)    = svc_ack_text    ($socket);
+my ($count_svc_unack,  $text_svc_unack)  = svc_unack_text  ($socket);
+my ($count_host_ack,   $text_host_ack)   = host_ack_text   ($socket);
+my ($count_host_unack, $text_host_unack) = host_unack_text ($socket);
+
+my $file = livestatus_socket_file ($SITE, $CONFIG->{'nagios'}->{'livestatus'});
+print <<ENDL;
+The following data is pulled from Livestatus, following the nagios site 
+'$SITE', at '$file'.
+
+ENDL
+
+my $format = "%35s  %3d matches\n";
+printf $format, 'Acknowleged Host Alerts', $count_host_ack;
+printf $format, 'Unacknowleged Host Alerts', $count_host_unack;
+printf $format, 'Acknowleged Service Alerts', $count_svc_ack;
+printf $format, 'Unacknowleged Service Alerts', $count_svc_unack;
+print "\n";
+
+print $text_host_ack, $text_host_unack;
+print $text_svc_ack, $text_svc_unack;
+
+##############################################################################
+### Internal Subroutines #####################################################
+##############################################################################
+
+### error_usage (TEXT)
+# Print an error message, then the basic help page
+sub error_usage {
+    warn "$0: @_\n\n";
+    pod2usage (-exit_status => 2, -verbose => 1);
+}
+
+### _host_query (SOCKET, FILTERS)
+# Does the actual 'GET hosts' work.
+sub _host_query {
+    my ($socket, @filters) = @_;
+    my $query = join ("\n", 'GET hosts', "Columns: $HOST_COLS", @filters);
+    my $hosts = $socket->selectall_arrayref ($query);
+
+    my ($count, @text);
+    foreach my $host (@$hosts) {
+        push @text, text_host ($host);
+        push @text, '' unless $count++ == scalar @$hosts;
+    }
+    return ($count, join ("\n", @text, ''));
+}
+
+### _svc_query (SOCKET, FILTERS)
+# Does the actual 'GET services' work.
+sub _svc_query {
+    my ($socket, @filters) = @_;
+    my $query = join ("\n", 'GET services', "Columns: $SVC_COLS", @filters);
+    my $svcs = $socket->selectall_arrayref ($query);
+
+    my ($count, @text);
+    foreach my $svc (@$svcs) {
+        push @text, text_svc ($svc);
+        push @text, '' unless $count++ == scalar @$svcs;
+    }
+    return ($count, join ("\n", @text, ''));
+}
+
+### _text (HEADER, COUNT, TEXT)
+# Takes the text that came from other functions and converts it to a nice
+# human-readable string.
+sub _text {
+    my ($header, $count, $text) = @_;
+    my @return;
+    push @return, sprintf ("%s (%d)", $header, $count || 0);
+    push @return, "=" x length ($header), '';
+    if ($text) { push @return, $text }
+    else {       push @return, "No matches", '' }
+    return ($count, join ("\n", @return));
+}
+
+### _text_person (NAME)
+# Pulls out the actual username from the 'acked by' field.  This can either 
+# be a DN, or an email address.
+sub _text_person {
+    my ($person) = @_;
+    if    ($person =~ /CN=([^\s\/]+)/) { return $1 }
+    elsif ($person =~ /(\S+)@(\S+)/)   { return $1 }
+    else { return $person }
+}
+
+### _text_time (TIME)
+# Makes a nice timestamp out of a seconds-since-epoch TIME
+sub _text_time { return strftime ("%Y-%m-%d %H:%M:%S %Z", localtime (shift)) }
+
+##############################################################################
+### Final Documentation ######################################################
+##############################################################################
+
+=head1 REQUIREMENTS
+
+B<FNAL::Nagios>
+
+=head1 AUTHOR
+
+Tim Skirvin <tskirvin@fnal.gov>
+
+=head1 LICENSE
+
+Copyright 2014, Fermi National Accelerator Laboratory
+
+This program is free software; you may redistribute it and/or modify it under
+the same terms as Perl itself.
+
+=cut
