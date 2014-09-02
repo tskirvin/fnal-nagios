@@ -432,7 +432,7 @@ if    (lc $TYPE eq 'problem')  {
     process_problem  ($svcName, $description)
 } elsif (lc $TYPE eq 'recovery') {
     process_recovery ($svcName, $description)
-} elsif (lc $TYPE eq 'ack|acknowledgement') {
+} elsif (lc $TYPE =~ m/^(ack|acknowledgement)$/i) {
     process_ack      ($svcName, $description)
 } else {
     error_usage ("unknown type: '$TYPE'")
