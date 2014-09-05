@@ -1,0 +1,1053 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+nagios-backend - a remctl-based nagios backend
+
+=head1 SYNOPSIS
+
+B<nagios-backend> ack host B<HOSTNAME> B<COMMENT>
+
+B<nagios-backend> ack service B<HOSTNAME> B<SERVICE> B<COMMENT>
+
+B<nagios-backend> downtime host B<HOSTNAME> B<HOURS> B<COMMENT>
+
+B<nagios-backend> query host B<HOSTNAME> 
+
+B<nagios-backend> query host B<HOSTNAME> service B<SERVICE> 
+
+B<nagios-backend> schedule host B<HOSTNAME> B<HOURS> B<COMMENT>
+
+B<nagios-backend> schedule service B<HOSTNAME> B<SERVICE> B<HOURS> B<COMMENT>
+
+B<nagios-backend> health B<HOST_WARN> B<HOST_CRIT> B<SVC_WARN> B<SVC_CRIT>
+
+B<nagios-backend> report (host|service|both|short) (B<NOACK>)
+
+B<nagios-backend> pull
+
+B<nagios-backend> pulltest
+
+B<nagios-backend> restart
+
+B<nagios-backend> help
+
+B<nagios-backend> man
+
+=head1 DESCRIPTION
+
+nagios-backend provides a remctl interface to the various nagios administration
+commands necessary to keep the service running.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-h>, B<--help>
+
+Prints out the synopsis information and exits.
+
+=item B<--man>
+
+Prints out a longer manual page and exits.
+
+=item B<--verbose>
+
+On verify functions, return all of the verification text, not just the
+errors/warnings.
+
+=back
+
+=cut
+
+##############################################################################
+### Configuration ############################################################
+##############################################################################
+
+## Local configuration, which can override any of the following options.
+our $CONFIG = "/etc/nagios/remctl.cfg";
+
+## Where is the nagios binary?
+our $NAGIOS = "/usr/sbin/nagios";
+
+## Main Nagios configuration file
+our $NAGIOS_CFG_DIR = '/etc/nagios';
+
+## Nagios takes its commands via a Unix pipe
+our $NAGIOS_CMD = '/var/nagios/rw/nagios.cmd';
+
+## Nagios stores its current-running status file as a flat file.
+our $NAGIOS_DAT = '/var/nagios/status.dat';
+
+## Nagios init file
+our $NAGIOS_INIT = "/etc/init.d/nagios";
+
+## Where are we keeping our nagios git repository?
+our $NAGIOS_VCS  = "svn";
+our $NAGIOS_REPO = 'file:///afs/slac.stanford.edu/g/scs/svn/systems/nagios-fermi';
+
+## nagiosstats binary
+our $NAGIOS_STATS = "/usr/sbin/nagiosstats";
+
+### Key binaries
+our $GIT   = "/usr/bin/git";
+our $RSYNC = "/usr/bin/rsync";
+our $SVN   = "/usr/bin/svn";
+
+## should we print information from 'nagios -v'?
+our $VERBOSE = 0;
+
+## How many seconds old can the status report be before we consider it stale?
+our $NAGIOS_DAT_SECS = 60 * 5;
+
+## How should we format the timestamps in our report?
+our $REPORT_TIME = "%Y-%m-%d";
+
+##############################################################################
+### Declarations #############################################################
+##############################################################################
+
+use strict;
+use warnings;
+
+use Class::Struct;
+use File::Copy;
+use File::Temp qw/tempdir tempfile/;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw/strftime/;
+
+## Generate nagios classes using Class::Struct
+our @NAG_FIELDS = qw/hoststatus servicestatus hostcomment servicecomment
+                     contactstatus programstatus servicedowntime hostdowntime/;
+our $NAG_FIELDS = {};
+foreach (@NAG_FIELDS) {
+    struct "Nagios::$_" => { values => '%' };
+    $$NAG_FIELDS{$_} = '@';
+}
+struct 'Nagios' => $NAG_FIELDS;
+
+$|++;               # flush output
+$0 =~ s%.*/%%g;     # lose the annoying path information
+
+## Who is running this script?
+our $USER = $ENV{'REMOTE_USER'} || $ENV{'SUDO_USER'} || 'unknown';
+
+##############################################################################
+### main () ##################################################################
+##############################################################################
+
+my $parser = new Getopt::Long::Parser;
+my $result = $parser->getoptions (
+    'verbose'  => \$VERBOSE,
+    'man'      => sub { pod2usage (-verbose => 2, -noperldoc => 1) },
+    'h|help'   => sub { pod2usage (-verbose => 1) }) || error_usage ();
+
+do $CONFIG or die "could not open $CONFIG: $@\n";
+
+my ($query, @rest) = @ARGV;
+error_usage ("no query provided") unless $query;
+
+our $TEMPDIR = tempdir (undef, 'CLEANUP' => 1);
+chmod 0755, $TEMPDIR;
+
+=head1 ARGUMENTS
+
+=over 4
+
+=item ack host B<HOST> B<COMMENT>
+
+=item ack service B<HOST> B<SERVICE> B<COMMENT>
+
+Acknowledge a host or service as down.  B<HOST> is the hostname, B<SERVICE> the
+service name, and B<COMMENT> is some explanatory text explaning why it's down.
+
+=cut
+
+if      (lc $query eq 'ack') {
+    my ($type, @args) = @rest;
+    if    (lc $type eq 'host')    { ack_host (@args) }
+    elsif (lc $type eq 'service') { ack_service (@args) }
+    else                          { error_usage ("invalid ack type: $type") }
+}
+
+=item check
+
+Confirm that the config file validates.
+
+=cut
+
+elsif (lc $query eq 'check') { validate () }
+
+=item downtime host B<HOST> B<HOURS> B<COMMENT>
+
+=item downtime service B<HOST> B<SERVICE> B<HOURS> B<COMMENT>
+
+Schedule downtime for a host or service.  B<HOST> is the hostname, B<SERVICE>
+the service name, B<HOURS> is the number of hours of downtime you want to
+schedule, and B<COMMENT> is some explanatory text.
+
+=cut
+
+elsif (lc $query eq 'downtime') {
+    my ($type, @args) = @rest;
+    if    (lc $type eq 'host')    { down_host (@args) }
+    elsif (lc $type eq 'service') { down_service (@args) }
+    else                          { error_usage ("invalid down type: $type") }
+}
+
+=item pull
+
+Update the current nagios tree from version control.  Only actually
+happens if pulltest succeeds.
+
+=cut
+
+elsif (lc $query eq 'pull') { pull () if pulltest (); }
+
+=item pulltest
+
+Pull the current nagios tree from version control to a temp directory, and see
+if the configuration file verifies.  Returns 0 on success, 1 on failure.
+
+=cut
+
+elsif (lc $query eq 'pulltest') {
+    if (pulltest ($TEMPDIR)) {
+        print "OK - configuration is valid\n";
+        exit 0;
+    } else {
+        print "ERROR - configuration is invalid\n";
+        exit 1;
+    }
+}
+
+=item report host B<NOACK>
+
+=item report service B<NOACK>
+
+=item report both B<NOACK>
+
+=item report short B<NOACK>
+
+Print formatted reports regarding the current down hosts or services, along
+with acknowledgement status and any associated comments.
+
+If B<NOACK> is set, then we will only report on un-acknowledged alerts.
+
+=cut
+
+elsif (lc $query eq 'report') {
+    my ($type, $noack, @args) = @rest;
+    $type ||= 'both';       # defaults are nice sometimes
+    $noack = $noack ? 1 : 0;
+    my %args = ( 'noack' => $noack );
+
+    my @report;
+    if (lc $type eq 'host')       { @report = nagios_report ('host', %args) }
+    elsif (lc $type eq 'service') { @report = nagios_report ('service', %args) }
+    elsif (lc $type eq 'both')    { @report = nagios_report ('both', %args) }
+    elsif (lc $type eq 'short')   { @report = nagios_report ('short', %args) }
+    elsif (lc $type eq 'raw')     { @report = nagios_report ('raw', %args) }
+    else { error_usage ("invalid report type: $type") }
+
+    print join ("\n", @report, '');
+    exit 0;
+}
+
+=item query host B<HOST>
+
+=item query host B<HOST> service B<SERVICE>
+
+Query the current state of host or services, along
+with acknowledgement status and any associated comments.
+
+=cut 
+
+elsif (lc $query eq 'query') {
+    my ($type, $hostname, $stype, $service ) = @rest;
+    $stype ||= 'none';       # defaults are nice sometimes
+   
+    my %args = ( 'host' => $hostname , 'service' => $service );
+
+    my @report;
+    if (lc $type eq 'host' && $stype eq 'none' )       { @report = nagios_query('host', %args) }
+    elsif (lc $stype eq 'service') { @report = nagios_query ('service', %args) }
+    else { error_usage ("invalid query type: $type") }
+
+    print join ("\n", @report, '');
+    exit 0;
+}
+
+
+=item health B<HOST_WARN> B<HOST_CRIT> B<SVC_WARN> B<SVC_CRIT>
+
+Check on the overall health of the hosts and services that this nagios instance
+is monitoring, in a way that is useful for nagios itself to monitor.
+
+Takes four input values, for host/service and warning/critical; each can be
+either a number or a percentage.  These numbers are floors - that is, if the
+acutal number of hosts down (and not acknowledged) is greater than HOST_WARN,
+then we'll throw a warning.  Input percentages are also accepted (1% vs 1).
+Mark '0' if you don't care about that particular check.
+
+Returns 2 if some or all of the numbers are above the error limits; 1 if some
+or all of the numbers are above the warnings limits; and 0 otherwise.
+
+=cut
+
+elsif (lc $query eq 'health') {
+    my ($host_warn, $host_crit, $svc_warn, $svc_crit) = @rest;
+    error_usage ("usage: health HOST_WARN HOST_CRIT SVC_WARN SVC_CRIT")
+        unless (   defined $host_warn && defined $host_crit
+                && defined $svc_warn  && defined $svc_crit );
+    my ($host_down, $host_total, $host_perc,
+        $svc_down,  $svc_total,  $svc_perc) = nagios_report ('raw', 'noack' => 1);
+    my ($err, $warn);
+
+    if ($host_warn =~ /(.*)%$/) { $warn++ if ($1 + $host_perc) < 100;   }
+    elsif ($host_warn)          { $warn++ if ($host_down >= $host_warn) }
+
+    if ($host_crit =~ /(.*)%$/) { $err++  if ($1 + $host_perc) < 100;   }
+    elsif ($host_crit)          { $err++  if ($host_down >= $host_crit) }
+
+    if ($svc_warn =~ /(.*)%$/)  { $warn++ if ($1 + $svc_perc) < 100;  }
+    elsif ($svc_warn)           { $warn++ if ($svc_down >= $svc_warn) }
+
+    if ($svc_crit =~ /(.*)%$/)  { $err++  if ($1 + $svc_perc) < 100;  }
+    elsif ($svc_crit)           { $err++  if ($svc_down >= $svc_crit) }
+
+    my $report = sprintf
+        "Hosts: %d/%d (%02.02f%%)  Services: %d/%d (%02.02f%%)",
+        $host_total - $host_down, $host_total, $host_perc,
+        $svc_total  - $svc_down,  $svc_total,  $svc_perc;
+
+    if    ($err)  { print "ERROR - $report\n";   exit 2 }
+    elsif ($warn) { print "WARNING - $report\n"; exit 1 }
+    else          { print "OK - $report\n";      exit 0 }
+}
+
+=item schedule host B<HOST> B<HOURS> B<COMMENT>
+
+=item schedule service B<HOST> B<SERVICE> B<HOURS> B<COMMENT>
+
+Schedule the next time that a given host/service check should occur.
+B<HOST> is the hostname, B<SERVICE> the service name, B<MINUTES> is the
+number of minutes you want to wait (defaults to 0).
+
+=cut
+
+elsif (lc $query eq 'schedule') {
+    my ($type, @args) = @rest;
+    if    (lc $type eq 'host')    { sched_host (@args) }
+    elsif (lc $type eq 'service') { sched_service (@args) }
+    else                          { error_usage ("invalid sched type: $type") }
+}
+
+=item validate
+
+Check to make sure that the current config file is valid.  This is accomplished
+by rsync'ing the current config into a new temporary directory, and running
+'nagios -v' against it (after tweaking the file to use config files right).
+
+=cut
+
+elsif (lc $query eq 'validate') {
+    if (validate ($NAGIOS_CFG_DIR)) {
+        print "OK - configuration is valid\n";
+        exit 0;
+    } else {
+        print "ERROR - configuration is invalid\n";
+        exit 1;
+    }
+}
+
+=item stats
+
+Print information about the current statistics.  Uses I<nagiosstats>.
+
+=cut
+
+elsif (lc $query eq 'stats') { system $NAGIOS_STATS }
+
+=item restart
+
+Restart nagios (with the init script), as long as the config validates.
+
+=cut
+
+elsif (lc $query eq 'restart') { restart () unless pull () }
+
+=item man
+
+Print the manual and exit.  (Same as --man)
+
+=cut
+
+elsif (lc $query eq 'man') { pod2usage (-verbose => 2, -noperldoc => 1) }
+
+=item help
+
+Print a short help page and exit.  (Same as --help)
+
+=cut
+
+elsif (lc $query eq 'help') { pod2usage (-verbose => 1); }
+
+=back
+
+=cut
+
+else { error_usage ("invalid query: $query") }
+
+exit 0;
+
+##############################################################################
+### Subroutines ##############################################################
+##############################################################################
+
+### ack_host (HOST, COMMENT)
+sub ack_host         {
+    my ($host, $comment) = @_;
+    error_usage ("Usage: ack host HOST COMMENT")
+        unless ($host && $comment);
+    my $cmd = sprintf ("[%s] ACKNOWLEDGE_HOST_PROBLEM;%s", time, $host);
+    return external_command ($cmd, 1, 1, 1, $USER, $comment);
+}
+
+### ack_service (HOST, SERVICE, COMMENT)
+sub ack_service      {
+    my ($host, $service, $comment) = @_;
+    error_usage ("Usage: ack service HOST SERVICE COMMENT")
+        unless ($host && $service && $comment);
+    my $cmd = sprintf ("[%s] ACKNOWLEDGE_SVC_PROBLEM;%s;%s",
+        time, $host, $service);
+    return external_command ($cmd, 1, 1, 1, $USER, $comment);
+}
+
+### down_host (HOST, LENGTH, COMMENT)
+# LENGTH is in hours.  Partial hours are okay.
+sub down_host    {
+    my ($host, $length, $comment) = @_;
+    error_usage ("Usage: downtime host HOST LENGTH COMMENT")
+        unless ($host && $length && $comment);
+    my $cmd = sprintf ("[%s] SCHEDULE_HOST_DOWNTIME;%s", time, $host);
+    my $duration = 3600 * $length;
+    return external_command ($cmd, time, time + $duration, 1, 0, $duration,
+        $USER, $comment);
+}
+
+### down_service (HOST, SERVICE, LENGTH, COMMENT)
+# LENGTH is in hours.  Partial hours are okay.
+sub down_service {
+    my ($host, $service, $length, $comment) = @_;
+    error_usage ("Usage: downtime service HOST SERVICE LENGTH COMMENT")
+        unless ($host && $service && $length && $comment);
+    my $cmd = sprintf ("[%s] SCHEDULE_SVC_DOWNTIME;%s;%s",
+        time, $host, $service);
+    my $duration = 3600 * $length;
+    return external_command ($cmd, time, time + $duration, 1, 0, $duration,
+        $USER, $comment);
+}
+
+sub nagios_report {
+    my ($type, %args) = @_;
+    my $nagios = nagios_parse_status ($NAGIOS_DAT);
+
+    ## check report
+    my $status = $nagios->programstatus;
+    foreach (@$status) {
+        my $lastcheck = $_->values ('last_command_check');
+        my $time = time;
+        unless ($time - $lastcheck < $NAGIOS_DAT_SECS) {
+            print "ERROR - has not checked in for $NAGIOS_DAT_SECS seconds\n";
+            exit 2;
+        }
+    }
+    my @report;
+    if      ($type eq 'host' ) {
+        push @report, "Host Report", '';
+        push @report, nagios_report_host ($nagios, %args);
+    } elsif ($type eq 'service' ) {
+        push @report, "Service Report", '';
+        push @report, nagios_report_service ($nagios, %args);
+    } elsif ($type eq 'both') {
+        push @report, "Host Report", '';
+        push @report, nagios_report_host ($nagios, %args);
+        push @report, '', "Service Report", '';
+        push @report, nagios_report_service ($nagios, %args);
+    } elsif ($type eq 'short') {
+        push @report, nagios_report_host    ($nagios, 'summary' => 1, %args);
+        push @report, nagios_report_service ($nagios, 'summary' => 1, %args);
+    } elsif ($type eq 'raw') {
+        push @report, nagios_report_host    ($nagios, 'raw' => 1, %args);
+        push @report, nagios_report_service ($nagios, 'raw' => 1, %args);
+    } else {
+        @report = "unknown type: $type";
+    }
+
+    return @report;
+
+}
+
+sub nagios_query {
+    my ($type, %args) = @_;
+    my $nagios = nagios_parse_status ($NAGIOS_DAT);
+
+    my @query; 
+    if ($type eq 'host' ) {
+        push @query, "Host query", '';
+        push @query, nagios_query_host ($nagios, %args);
+    } elsif ($type eq 'service' ) {
+        push @query, "Service query", '';
+        push @query, nagios_query_service ($nagios, %args);
+    } else {
+        @query = "unknown type: $type";
+    }
+
+    return @query;
+}
+
+sub nagios_query_host {
+    my ($nagios, %opts) = @_;
+    my %hc = nagios_comment_host ($nagios);
+
+    my $summary  = $opts{'summary'} || 0;
+    my $raw      = $opts{'raw'}     || 0;
+    my $noack    = $opts{'noack'}   || 0;
+    my $target_host = $opts{'host'}  || return "No host specified in query" ; 
+
+    my $count = 0;
+    my @return;
+
+    my $hosts = $nagios->hoststatus;
+    foreach my $host (@$hosts) {
+        my $hostname = $host->values ('host_name');
+        my $state = $host->values ('current_state');
+        my $last_up = $host->values ('last_hard_state_change');
+
+        next unless $hostname eq $target_host;
+        my @comments;
+        my $ack = 0;
+
+        if (my $hc = $hc{$hostname}) {
+            foreach my $time (sort keys %$hc) {
+                my $comment = $$hc{$time};
+                if ($time > $last_up) {
+                    $ack++;
+                    push @comments, $comment;
+                } else {
+                    push @comments, "$comment (OLD)";
+                }
+            }
+        }
+
+       
+        push @return, sprintf ("%-40s  %-6s  %s", $hostname,
+            $ack ? "ACK" : "NOACK",
+            $host->values ('plugin_output'));
+
+        if (scalar @comments) {
+            foreach (@comments) { push @return, "  * $_" }
+        } else {
+            push @return, "  * no associated comments";
+        }
+        push @return, '';
+        last ; 
+    }
+  
+    unless (scalar @return) {
+        push @return, sprintf("%-40s not found in nagios", $target_host);
+    }
+
+    @return;
+}
+
+
+### nagios_report_host (NAGIOS, OPTS?)
+#
+sub nagios_report_host {
+    my ($nagios, %opts) = @_;
+    my %hc = nagios_comment_host ($nagios);
+
+    my $summary  = $opts{'summary'} || 0;
+    my $raw      = $opts{'raw'}     || 0;
+    my $noack    = $opts{'noack'}   || 0;
+
+    my $count = 0;
+    my @return;
+
+    my $hosts = $nagios->hoststatus;
+    foreach my $host (@$hosts) {
+        my $hostname = $host->values ('host_name');
+        my $state = $host->values ('current_state');
+        my $last_up = $host->values ('last_hard_state_change');
+
+        next if $state eq '0';
+        my @comments;
+        my $ack = 0;
+
+        if (my $hc = $hc{$hostname}) {
+            foreach my $time (sort keys %$hc) {
+                my $comment = $$hc{$time};
+                if ($time > $last_up) {
+                    $ack++;
+                    push @comments, $comment;
+                } else {
+                    push @comments, "$comment (OLD)";
+                }
+            }
+        }
+
+        next if ($ack && $noack);
+
+        push @return, sprintf ("%-40s  %-6s  %s", $hostname,
+            $ack ? "ACK" : "NOACK",
+            $host->values ('plugin_output'));
+
+        if (scalar @comments) {
+            foreach (@comments) { push @return, "  * $_" }
+        } else {
+            push @return, "  * no associated comments";
+        }
+        push @return, '';
+
+        $count++;
+    }
+    my $perc = 100 - 100 * ($count / scalar @$hosts);
+
+    if ($raw)   { return ($count, scalar @$hosts, $perc) }
+    if ($summary) { @return = () }  # clear report if we only want the summary
+    push @return, sprintf "Hosts: %d unhealthy, %d total (%02.2f%% up)",
+        $count, scalar @$hosts, $perc;
+
+    @return;
+}
+
+# Just a dummy stub copy for now. 
+sub nagios_query_service {
+    my ($nagios, %opts) = @_;
+    my %hc = nagios_comment_host    ($nagios);
+    my %sc = nagios_comment_service ($nagios);
+
+    my $summary  = $opts{'summary'} || 0;
+    my $raw      = $opts{'raw'}     || 0;
+    my $noack    = $opts{'noack'}   || 0;
+    my $target_host = $opts{'host'} || return "No host specified in query"; 
+    my $target_service = $opts{'service'} || return "No service specified in query" ; 
+
+    my @return;
+
+    my $services = $nagios->servicestatus;
+    foreach my $service (@$services) {
+       
+        my $host    = $service->values ('host_name');
+        my $svc     = $service->values ('service_description');
+        next unless ( $host eq $target_host && $svc eq $target_service) ; 
+        my $state = $service->values ('current_state');
+        my $last_up = $service->values ('last_hard_state_change'); 
+        my $pair    = "$host/$svc";
+
+
+        my @comments;
+        my $ack = "NOACK";
+
+        if (my $sc = $sc{$pair}) {
+            foreach my $time (sort keys %$sc) {
+                my $comment = $$sc{$time};
+                if ($time > $last_up) {
+                    $ack = "ACK";
+                    push @comments, $comment;
+                } else {
+                    push @comments, "$comment (OLD)";
+                }
+            }
+        }
+
+        if (my $hc = $hc{$host}) {
+            foreach my $time (sort keys %$hc) {
+                my $comment = $$hc{$time};
+                if ($time > $last_up) {
+                    $ack = "PARENT";
+                    push @comments, "$comment (PARENT)";
+                }
+            }
+        }
+
+        push @return, sprintf ("%-40s  %-6s  %-s", $pair,
+            $ack, $service->values ('plugin_output'));
+        if (scalar @comments) {
+            foreach (@comments) { push @return, "  * $_" }
+        } else {
+            push @return, "  * no associated comments";
+        }
+        push @return, '';
+        last ; 
+    }
+
+    unless ( scalar @return ) {
+        push @return, sprintf "service %s on %s not found in nagios",
+            $target_service,$target_host;
+    }
+    @return;
+}
+
+### nagios_report_service (NAGIOS, SHORT?)
+#
+sub nagios_report_service {
+    my ($nagios, %opts) = @_;
+    my %hc = nagios_comment_host    ($nagios);
+    my %sc = nagios_comment_service ($nagios);
+
+    my $summary  = $opts{'summary'} || 0;
+    my $raw      = $opts{'raw'}     || 0;
+    my $noack    = $opts{'noack'}   || 0;
+
+    my $count = 0;
+    my @return;
+
+    my $services = $nagios->servicestatus;
+    foreach my $service (@$services) {
+        my $state = $service->values ('current_state');
+        next if $state eq '0';
+        my $host    = $service->values ('host_name');
+        my $last_up = $service->values ('last_hard_state_change');
+        my $svc     = $service->values ('service_description');
+        my $pair    = "$host/$svc";
+
+        my @comments;
+        my $ack = "NOACK";
+
+        if (my $sc = $sc{$pair}) {
+            foreach my $time (sort keys %$sc) {
+                my $comment = $$sc{$time};
+                if ($time > $last_up) {
+                    $ack = "ACK";
+                    push @comments, $comment;
+                } else {
+                    push @comments, "$comment (OLD)";
+                }
+            }
+        }
+
+        if (my $hc = $hc{$host}) {
+            foreach my $time (sort keys %$hc) {
+                my $comment = $$hc{$time};
+                if ($time > $last_up) {
+                    $ack = "PARENT";
+                    push @comments, "$comment (PARENT)";
+                }
+            }
+        }
+
+        next if ($ack ne 'NOACK' && $noack);
+
+        push @return, sprintf ("%-40s  %-6s  %-s", $pair,
+            $ack, $service->values ('plugin_output'));
+        if (scalar @comments) {
+            foreach (@comments) { push @return, "  * $_" }
+        } else {
+            push @return, "  * no associated comments";
+        }
+        push @return, '';
+
+        $count++;
+    }
+
+    my $perc = 100 - 100 * ($count / scalar @$services);
+
+    if ($raw)   { return ($count, scalar @$services, $perc) }
+    if ($summary) { @return = () }  # clear report if we only want the summary
+
+    push @return, sprintf "Services: %d unhealthy, %d total (%02.2f%% up)",
+        $count, scalar @$services, $perc;
+    @return;
+}
+
+
+### nagios_comment_host (NAGIOS)
+# Get the list of host comments
+sub nagios_comment_host {
+    my ($nagios) = @_;
+    my %hc;
+
+    my $hc = $nagios->hostcomment;
+    my $hd = $nagios->hostdowntime;
+    foreach my $comment (@$hc) {
+        my $hostname = $comment->values ('host_name');
+        my $author   = $comment->values ('author')       || 'unknown';
+        my $time     = $comment->values ('entry_time')   || 0;
+        my $text     = $comment->values ('comment_data') || 'none';
+
+        $author =~ s/@.*//;     # trim off email address bits
+
+        my $value = sprintf ("%s - %s (%s)",
+            strftime ($REPORT_TIME, localtime ($time)), $text, $author);
+        $hc{$hostname} ||= {},
+        $hc{$hostname}->{$time} = $value;
+    }
+
+    foreach my $comment (@$hd) {
+        my $hostname = $comment->values ('host_name');
+        my $author   = $comment->values ('author')       || 'unknown';
+        my $time     = $comment->values ('entry_time')   || 0;
+        my $text     = $comment->values ('comment') || 'none';
+
+        $author =~ s/@.*//;     # trim off email address bits
+
+        my $value = sprintf ("%s - %s (%s) (DOWNTIME)",
+            strftime ($REPORT_TIME, localtime ($time)), $text, $author);
+
+        $hc{$hostname} ||= {},
+        $hc{$hostname}->{"$time.1"} = $value;
+    }
+
+    return %hc;
+}
+
+### nagios_comment_service (NAGIOS)
+# Get the list of service comments
+sub nagios_comment_service {
+    my ($nagios) = @_;
+    my %hc = nagios_comment_host ($nagios);
+    my %sc;
+
+    my $sc = $nagios->servicecomment;
+    my $sd = $nagios->servicedowntime;
+    foreach my $comment (@$sc) {
+        my $hostname = $comment->values ('host_name');
+        my $service  = $comment->values ('service_description');
+        my $author   = $comment->values ('author')       || 'unknown';
+        my $time     = $comment->values ('entry_time')   || 0;
+        my $text     = $comment->values ('comment_data') || 'none';
+        $author =~ s/@.*//;     # trim off email address bits
+
+        my $key = "$hostname/$service";
+        my $value = sprintf ("%s - %s (%s)",
+            strftime ($REPORT_TIME, localtime ($time)), $text, $author);
+        $sc{$key} ||= {},
+        $sc{$key}->{$time} = $value;
+    }
+
+    foreach my $comment (@$sd) {
+        my $hostname = $comment->values ('host_name');
+        my $service  = $comment->values ('service_description');
+        my $author   = $comment->values ('author')       || 'unknown';
+        my $time     = $comment->values ('entry_time')   || 0;
+        my $text     = $comment->values ('comment') || 'none';
+        $author =~ s/@.*//;     # trim off email address bits
+
+        my $key = "$hostname/$service";
+        my $value = sprintf ("%s - %s (%s) (DOWNTIME)",
+            strftime ($REPORT_TIME, localtime ($time)), $text, $author);
+
+        $sc{$key} ||= {},
+        $sc{$key}->{"$time.1"} = $value;
+    }
+
+    return %sc;
+}
+
+### nagios_parse_status (FILE)
+# Parse a status file into its component records, and create a Nagios
+# object.  In an ideal world, this would live in a separate object; as it
+# stands.
+sub nagios_parse_status {
+    my ($statusfile) = @_;
+
+    my $nagios = Nagios->new;
+    my ($fh, $tmpfile) = tempfile (undef, 'UNLINK' => 1);
+
+    copy ($statusfile, $tmpfile) or die "could not copy $statusfile: $@\n";
+    open FILE, '<', $tmpfile or die "could not read $tmpfile: $@\n";
+
+    my $type = '';
+    my $record = undef;
+    while (my $line = <FILE>) {
+        chomp $line;
+        $line =~ s%^\s*|\s*$%%g;     # drop extra white space
+        $line =~ s%^\#.*%%g;         # drop comments
+        next if $line =~ /^\s*$/;    # skip blank lines
+
+        if ($line =~ /^(\w+)\s*\{$/) {        # new block
+            $type   = lc $1;
+            if ($$NAG_FIELDS{$type}) {
+                $record = "Nagios::${type}"->new;
+            }
+        } elsif ($line =~ /^(\w+)=(.*)$/) { # content in block
+            if (defined $record) { $record->values ($1, $2) }
+        } elsif ($line eq '}') {           # end of block
+            if (defined $record) { push @{$nagios->$type}, $record }
+            $type = '';
+            $record = undef;
+        } else {
+            # warn "bad line: $line\n";     # it's not worth keeping track
+        }
+    }
+
+    $nagios;
+}
+
+### pull ()
+# Pulls the most recent version of the config file from git/svn.  Note
+# that the repository must already be populated.
+sub pull {
+    my $cmd;
+    if      ($NAGIOS_VCS eq 'svn') {
+        $cmd = "cd $NAGIOS_CFG_DIR && $NAGIOS_VCS update";
+    } elsif ($NAGIOS_VCS eq 'git') {
+        $cmd = "cd $NAGIOS_CFG_DIR && $NAGIOS_VCS pull --rebase";
+    } else {
+        error ("do not know how to clone from VCS '$NAGIOS_VCS'");
+    }
+    system $cmd;
+}
+
+### pulltest ()
+# Pull down the most recent version of the repo and tests it.  Doesn't actaully
+# work right now, and I'm not sure why.
+sub pulltest {
+    my $cmd;
+    if      ($NAGIOS_VCS eq 'svn') {
+        $cmd = "$SVN checkout $NAGIOS_REPO -q $TEMPDIR";
+    } elsif ($NAGIOS_VCS eq 'git') {
+        $cmd = "$GIT clone -vq $NAGIOS_REPO $TEMPDIR";
+    } else {
+        error ("do not know how to clone from VCS '$NAGIOS_VCS'");
+    }
+    system $cmd;
+    return ! validate_dir ($TEMPDIR);
+}
+
+### restart ()
+# Restart the service.  Only do so if the config validates.
+sub restart {
+    my $return = validate ();
+    if ($return == 0) {
+        print "NOT OK - config does not validate\n";
+    } else {
+        system ("$NAGIOS_INIT restart")
+    }
+}
+
+### sched_host (HOST, TIME)
+# LENGTH is in minutes; defaults to 0.
+sub sched_host {
+    my ($host, $time) = @_;
+    $time ||= 0;
+    error_usage ("Usage: schedule host HOST LENGTH") unless ($host);
+    my $at  = $time ? 60 * $time : 5;
+    my $cmd = sprintf ("[%s] SCHEDULE_FORCED_HOST_CHECK;%s", time, $host);
+    return external_command ($cmd, time + $at, $USER);
+}
+
+### sched_service (HOST, SERVICE, TIME)
+# LENGTH is in minutes; defaults to 5 seconds.
+sub sched_service {
+    my ($host, $service, $time) = @_;
+    $time ||= 0;
+    error_usage ("Usage: schedule service HOST SERVICE LENGTH")
+        unless ($host && $service);
+    my $at  = $time ? 60 * $time : 5;
+    my $cmd = sprintf ("[%s] SCHEDULE_FORCED_SVC_CHECK;%s;%s",
+        time, $host, $service);
+    return external_command ($cmd, time + $at, $USER);
+}
+
+### validate ()
+# Confirm that the nagios code validates.  Invokes validate_dir ()
+sub validate {
+    my $basedir = $NAGIOS_CFG_DIR;
+    system ("/usr/bin/rsync -a $basedir/ $TEMPDIR");
+    ! validate_dir ($TEMPDIR);
+}
+
+### validate_dir (DIR)
+# We have to do a couple of seds to keep things happy; more may come
+# later.  Remember, the verification will be run as user 'nagios'!
+sub validate_dir {
+    my ($dir) = @_;
+    my $basedir = $NAGIOS_CFG_DIR;
+    my $config = "$dir/nagios.cfg";
+    system ("/bin/sed -i -e 's%$basedir%$dir%g' $config");
+    system ("/bin/sed -i -e 's%check_result_path=.*%check_result_path=/tmp%g' $config");
+    open (CMD, "$NAGIOS -v $config |");
+    while (<CMD>) {
+       unless ($VERBOSE) { next unless /(Warning|Error|Unable)/ }
+       print;
+    }
+    close CMD;
+    return $?;
+}
+
+##############################################################################
+### Internal Subroutines #####################################################
+##############################################################################
+
+### error (TEXT) - die with a consistent error message
+sub error {
+    my $text = "@_";
+    chomp $text;
+    die "$0: $text\n"
+}
+
+### error_usage (TEXT)
+# Print an error message, then the basic help page
+sub error_usage {
+    warn "$0: @_\n\n";
+    pod2usage (-exit_status => 2, -verbose => 1);
+}
+
+### external_command (@COMMAND)
+# Run an external nagios command by writing text to $NAGIOS_CMD
+sub external_command {
+    my (@command) = @_;
+    my $cmd = join (';', @command);
+    open (CMD, "> $NAGIOS_CMD") or
+        error ("could not write to $NAGIOS_CMD: $@");
+    print CMD "$cmd\n";
+    close CMD;
+}
+
+##############################################################################
+### Final Documentation ######################################################
+##############################################################################
+
+=head1 TODO
+
+=over 4
+
+=item DEL_HOST_COMMENT
+
+=item DEL_SVC_COMMENT
+
+=item various downtime reports/cancellations
+
+=item individual host report
+
+=item individual service report
+
+=back
+
+=head1 NOTES
+
+Because we're writing to a named pipe in order to send commands to the nagios
+process, there is no good way of confirming that a nagios command actually
+*worked*.  Keep that in mind.
+
+=head1 AUTHOR
+
+Tim Skirvin <tskirvin@slac.stanford.edu>
+
+Huaqing Zheng <morpheus@stanford.edu>
+
+Xueshan Feng <sfeng@stanford.edu>
+
+=head1 LICENSE
+
+Copyright 2011-2012 Board of Trustees, Leland Stanford Jr. University
+
+This program is free software; you may redistribute it and/or modify
+it under the same terms as Perl itself.
+
+=cut
