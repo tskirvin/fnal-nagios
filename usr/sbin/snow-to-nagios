@@ -107,9 +107,9 @@ sub nagiosSocketService {
     my $nagiosLookup = nagiosSocket ($site, 'GET hosts',
        'Columns: services_with_state', "Filter: host_name = $host");
     return undef unless $nagiosLookup;
-    if (exists $nagiosLookup->[0]) {
+    if (exists $nagiosLookup->[0] && ref $nagiosLookup->[0]) {
         my $item = $nagiosLookup->[0];
-        my $arrayLength=length($item);
+        my $arrayLength=length(@$item);
         for (my $count = 0; $count < $arrayLength; $count++) {
             if (exists $$item[$count] &&
                 $$item[$count][0] eq $service &&
