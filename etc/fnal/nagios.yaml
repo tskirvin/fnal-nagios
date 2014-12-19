@@ -34,10 +34,10 @@ snowConfig: '/etc/snow/config.yaml'
 ## the command line.
 
 ticket:
-    assignment_group:       'CMS-CIS'
+    assignment_group:       'ECF-CIS'
     caller_id:              'cd-srv-cmdb'
     comment:                '(no comment)'
-    group:                  'CMS-CIS'
+    group:                  'ECF-CIS'
     impact:                 '3'
     servicename:            'host'
     short_description:      '(no subject)'
